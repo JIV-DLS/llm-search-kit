@@ -15,6 +15,34 @@ plug it into any catalog: products, jobs, recipes, anything searchable.
 
 ---
 
+## 🚀 Want it running in 5 minutes?
+
+> Read **[`GETTING_STARTED.md`](GETTING_STARTED.md)** — a single playbook that
+> walks from `git clone` to a working **`POST /chat`** HTTP service your
+> frontend can call, with every command, every expected output, and a
+> troubleshooting table. No need to read anything else first.
+
+```bash
+git clone https://github.com/JIV-DLS/llm-search-kit.git && cd llm-search-kit
+pip install -e ".[dev,flask]"
+
+# 1) Verify the adapter against your backend, no LLM key needed:
+python -m llm_search_kit.examples.beasyapp_backend.smoke
+
+# 2) Verify the kit:
+pytest -q
+
+# 3) Start the chat service (after putting your LLM key in .env):
+python -m llm_search_kit.examples.beasy_service \
+    --beasy-url https://your-backend.example.com --port 5000
+```
+
+Now your frontend can `POST` to `http://127.0.0.1:5000/chat` with
+`{"message": "...", "session_id": "..."}` and get back
+`{"reply", "products", "meta"}`.
+
+---
+
 ## 👉 Where do I start? (decision tree)
 
 | What you want to do                                              | Open this                                                                                |
@@ -100,8 +128,9 @@ Elasticsearch adapter, see [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 | `amazon_products/`           | A complete domain (schema + soul.md + in-memory SQLite catalog) you can run. |
 | `real_estate_togo/`          | Same but for property search, with both in-memory and HTTP catalog adapters.  |
 | `elasticsearch_catalog/`     | A production-grade `CatalogBackend` against Elasticsearch 8.x.                |
-| `beasyapp_backend/`          | Real-world adapter: kit ↔ existing Spring Boot `POST /api/v1/listings/search`. PII-scrubbed; covered by 28 unit tests + 9 live tests. |
+| `beasyapp_backend/`          | Real-world adapter: kit ↔ existing Spring Boot `POST /api/v1/listings/search`. PII-scrubbed; covered by 28 unit tests + 9 live tests. Includes a no-LLM `smoke.py` script that prints PASS/FAIL for 8 scenarios. |
 | `flask_server/`              | A Flask app exposing `POST /chat` and `POST /sessions/<id>/reset`.            |
+| `beasy_service.py`           | **One-command service**: `python -m llm_search_kit.examples.beasy_service --beasy-url ...` boots a Flask `/chat` already wired to the Beasyapp backend with PII scrubbing. Importable as a WSGI app via `gunicorn`. |
 
 ---
 
