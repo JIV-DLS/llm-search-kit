@@ -1,0 +1,1 @@
+"""Amazon-products example domain."""

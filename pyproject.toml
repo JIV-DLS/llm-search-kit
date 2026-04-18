@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-search-kit"
+version = "0.1.0"
+description = "Domain-agnostic agentic LLM search kit. Plug any OpenAI-compatible API and any catalog backend."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "llm-search-kit" }]
+keywords = ["llm", "agent", "search", "openai", "tool-calling"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "httpx>=0.25",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+examples = [
+    "rich>=13.0",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+]
+
+[project.urls]
+Homepage = "https://example.com/llm-search-kit"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["llm_search_kit*"]
+
+[tool.setuptools.package-data]
+"llm_search_kit.examples.amazon_products" = ["*.md"]
+"llm_search_kit.examples.real_estate_togo" = ["*.md"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
