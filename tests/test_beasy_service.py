@@ -162,6 +162,78 @@ def test_chat_rejects_empty_message():
     assert resp.get_json()["error"]
 
 
+def test_french_baby_gift_query_yields_relevant_search_call():
+    """Regression: a real shopper sentence in French, vague intent, no price.
+
+    Original message Armand sent us:
+        "je veux offrir quelque chose à un nouveau-né,
+         des vêtements doux et confortables pour bébé"
+
+    The kit must, for this kind of input:
+      * call ``search_catalog`` (not answer from training data),
+      * pass a baby-related ``query`` so the backend's text search hits
+        the right listings,
+      * NOT invent a price cap the user never gave (no ``min_price``,
+        no ``max_price``),
+      * still scrub PII even when the user query is emotional / gift-y,
+      * surface the baby items to the frontend in ``products``.
+    """
+    backend_listings = [
+        {
+            "id": 15, "title": "Body bébé en coton bio – Blanc", "price": 2500.0,
+            "creator": {"id": 1, "username": "shop1",
+                        "email": "leak@x.com", "phone": "+228..."},
+        },
+        {
+            "id": 16, "title": "Pyjama bébé à motifs étoiles", "price": 3200.0,
+            "creator": {"id": 2, "username": "shop2"},
+        },
+        {
+            "id": 17, "title": "Robe bébé fleurie – Rose pastel", "price": 3900.0,
+            "creator": {"id": 3, "username": "shop3"},
+        },
+    ]
+    scripted = [
+        [make_tool_call("c1", "search_catalog",
+                        {"query": "vêtements bébé doux coton"})],
+        ("Pour un nouveau-né, je te recommande le Body bébé en coton bio "
+         "à 2 500 FCFA et le Pyjama bébé à motifs étoiles à 3 200 FCFA. "
+         "Les deux sont doux et adaptés aux peaux sensibles."),
+    ]
+    app = _build_app(scripted, listings=backend_listings, total=3)
+    client = app.test_client()
+
+    user_msg = ("je veux offrir quelque chose à un nouveau-né, "
+                "des vêtements doux et confortables pour bébé")
+    resp = client.post("/chat", json={"message": user_msg, "session_id": "gift"})
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+
+    filters_used = body["meta"]["filters_used"]
+    assert "min_price" not in filters_used, (
+        "LLM hallucinated a min_price the user never gave: "
+        f"{filters_used}"
+    )
+    assert "max_price" not in filters_used, (
+        "LLM hallucinated a max_price the user never gave: "
+        f"{filters_used}"
+    )
+    assert body["meta"]["tool_calls"] == 1
+    assert body["meta"]["total"] == 3
+
+    titles = [p["title"] for p in body["products"]]
+    assert any("bébé" in t.lower() for t in titles), (
+        f"No baby-related product surfaced; got titles: {titles}"
+    )
+    for product in body["products"]:
+        creator = product.get("creator") or {}
+        assert "email"     not in creator
+        assert "password"  not in creator
+        assert "phone"     not in creator
+        assert "addresses" not in creator
+
+
 def test_session_reset_clears_history():
     app = _build_app(scripted_llm_responses=["first"], listings=[], total=0)
     client = app.test_client()

@@ -213,10 +213,16 @@ python -m llm_search_kit.examples.beasy_service \
 # Health check (no LLM call):
 curl -s http://127.0.0.1:5000/health | python3 -m json.tool
 
-# Real chat call:
+# Real chat call (English, with a price cap):
 curl -s -X POST http://127.0.0.1:5000/chat \
   -H "Content-Type: application/json" \
   -d '{"message":"red Samsung TV under 100000 FCFA","session_id":"demo"}' \
+  | python3 -m json.tool
+
+# Real chat call (French, gift-shopping, no price, vague intent):
+curl -s -X POST http://127.0.0.1:5000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message":"je veux offrir quelque chose à un nouveau-né, des vêtements doux et confortables pour bébé","session_id":"gift"}' \
   | python3 -m json.tool
 ```
 
