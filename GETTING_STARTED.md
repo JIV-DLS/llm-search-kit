@@ -349,6 +349,87 @@ more depth.
 
 ---
 
+## 8b. Test the LLM brain (not just the plumbing)
+
+Everything up to this point exercises the **plumbing**: the catalog
+adapter, the agent loop, the HTTP wiring. None of it tests whether the
+**LLM** actually behaves correctly on real user-style prompts. For that,
+the kit ships a third tier of tests gated by `LLM_LIVE=1`.
+
+### Tier 1 — offline (default `pytest`)
+
+```bash
+pytest -q                      # 70+ tests, no network, no LLM key
+```
+
+Tests the agent loop, the adapter, PII scrubbing, session memory, error
+paths — all with mocked LLM and mocked backend. Runs in < 1s, must
+always pass before merging.
+
+### Tier 2 — live backend (no LLM)
+
+```bash
+BEASY_LIVE=1 pytest tests/test_beasyapp_live.py -v
+python -m llm_search_kit.examples.beasyapp_backend.smoke
+```
+
+Tests the catalog adapter against the **real Beasy backend** (or
+yours, via `BEASY_BASE_URL`). Still no LLM cost. Catches "your Spring
+endpoint is returning a different shape than we think" bugs.
+
+### Tier 3 — live LLM end-to-end
+
+```bash
+# Pytest suite — outcome-based, opt-in, repeats each test 3x and
+# requires >=2/3 passes (so a model that's 95% right doesn't flake):
+LLM_LIVE=1 pytest tests/test_llm_live.py -v
+
+# Human-readable report card across 15 realistic prompts (English +
+# French, including Armand's "vêtements pour bébé" example):
+python scripts/run_scenarios.py
+python scripts/run_scenarios.py --only baby_gift     # debug one scenario
+python scripts/run_scenarios.py --out-md report.md   # commit a snapshot
+```
+
+Tests the **LLM brain** itself: does the model actually call
+`search_catalog`, with sensible filters, in the user's language,
+without inventing a budget the user didn't give, without leaking PII?
+The same env vars that drive the chat service drive these tests, so
+swapping providers is one env-var change:
+
+```bash
+# Default — Technas LLM gateway (Claude Sonnet primary, Gemini fallback):
+LLM_BASE_URL=https://llm.technas.fr/v1
+LLM_MODEL=smart
+LLM_API_KEY=<litellm_master_key>
+
+# Or any other OpenAI-compatible provider:
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_MODEL=llama-3.1-70b-versatile
+LLM_API_KEY=gsk_...
+```
+
+**What to do with the report card:**
+
+- All `PASS` → ship.
+- `WARN` rows are usually prompt-tuning opportunities (e.g. the model
+  put a color word in `query` instead of extracting it as `color`).
+  Edit `soul.md` and re-run.
+- `FAIL` rows are blockers (e.g. the model invented a `max_price` the
+  user didn't give, or leaked PII). Tighten the prompt or switch model.
+
+### When to run each tier
+
+| Trigger                                     | Tier 1 | Tier 2 | Tier 3 (pytest) | Tier 3 (report card) |
+|---------------------------------------------|:------:|:------:|:---------------:|:--------------------:|
+| Every commit / pre-merge CI                 | ✅      |        |                 |                      |
+| Pre-deploy of the catalog adapter           | ✅      | ✅      |                 |                      |
+| Pre-deploy of the chat service              | ✅      | ✅      | ✅               |                      |
+| Editing `soul.md` or switching model        | ✅      |        | ✅               | ✅                    |
+| Investigating "the assistant said X" bugs   |        |        |                 | ✅                    |
+
+---
+
 ## 9. Production checklist
 
 When you're ready to put this in front of real users:
@@ -393,6 +474,8 @@ When you're ready to put this in front of real users:
 | Chat reply is in the wrong language                              | Edit `llm_search_kit/examples/beasyapp_backend/soul.md` — the line *"Default to the user's language"* — to force a specific language.                            |
 | Reply mentions products that aren't in the catalog               | The model is hallucinating. Strengthen `soul.md`: *"Never invent listings. If the tool returns 0 items, say so explicitly."*                                     |
 | `relaxation_level` is always 0 even when filters seem strict     | Your backend may already be doing fuzzy matching. That's fine — relaxation is a safety net, not a requirement.                                                   |
+| Tier-3 pytest `test_real_llm_*` keeps flaking (1/3 or 2/3 passes) | The model is borderline reliable on that scenario. Tighten `soul.md` with an explicit example of the failing case (see how `baby_gift` was added), or swap to a stronger model (`gpt-4o-mini` → `gpt-4o`, `llama-3.1-8b-instant` → `llama-3.1-70b-versatile`, `smart` over `local`). |
+| `run_scenarios.py` reports FAIL on `pii_safety_canary`           | **Hard stop, do not deploy.** The reply contained an email-pattern or phone-pattern. Verify (a) the adapter still scrubs PII (run `pytest tests/test_beasyapp_backend.py -k pii`), and (b) the system prompt still has the "Never quote the seller's email/phone…" line.       |
 | PII (email/phone/password) shows up in `/chat` response          | **Stop and report this.** That's a security regression. Check that you didn't override `listing_transform` to disable scrubbing. Re-run the live test `test_freetext_search_returns_kit_shape` — it asserts PII is absent.  |
 
 If something here doesn't match what you see, open an issue with the

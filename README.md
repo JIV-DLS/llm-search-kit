@@ -29,10 +29,13 @@ pip install -e ".[dev,flask]"
 # 1) Verify the adapter against your backend, no LLM key needed:
 python -m llm_search_kit.examples.beasyapp_backend.smoke
 
-# 2) Verify the kit:
+# 2) Verify the kit (mocked LLM, < 1s):
 pytest -q
 
-# 3) Start the chat service (after putting your LLM key in .env):
+# 3) Verify the LLM brain on real prompts (requires LLM_API_KEY):
+python scripts/run_scenarios.py        # 15-scenario report card
+
+# 4) Start the chat service:
 python -m llm_search_kit.examples.beasy_service \
     --beasy-url https://your-backend.example.com --port 5000
 ```
