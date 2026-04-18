@@ -13,6 +13,22 @@ vendor SDK required.
 Originally extracted from a real-estate chatbot ("rede"); generalised so you can
 plug it into any catalog: products, jobs, recipes, anything searchable.
 
+---
+
+## 👉 Where do I start? (decision tree)
+
+| What you want to do                                              | Open this                                                                                |
+|------------------------------------------------------------------|------------------------------------------------------------------------------------------|
+| **Just see it work** in 30 seconds, zero infra                  | `python -m llm_search_kit.examples.amazon_products.run` (in-memory SQLite)                |
+| **Plug it into my own database** (Postgres / Mongo / Elastic…)  | Read **[`docs/INTEGRATION.md`](docs/INTEGRATION.md)** + copy `examples/elasticsearch_catalog/` |
+| **Expose it as an HTTP API** for my frontend                     | Copy `examples/flask_server/` → `python -m llm_search_kit.examples.flask_server.run`     |
+| **Real-estate** style search, with an HTTP backend already      | `examples/real_estate_togo/`                                                              |
+| **Add a non-search skill** (compare, recommend, summarise)      | `llm_search_kit/agent/base_skill.py`                                                      |
+
+> 📘 **If you have an existing Amazon-like app and you don't know where to start: read [`docs/INTEGRATION.md`](docs/INTEGRATION.md) first.** It is a step-by-step cookbook with a worked Flask + Elasticsearch example matching exactly that situation.
+
+---
+
 ## Quick start
 
 ```bash
@@ -26,8 +42,11 @@ python -m llm_search_kit.examples.amazon_products.run
 # Or one-shot:
 python -m llm_search_kit.examples.amazon_products.run --query "red Nike running shoes under 80$ size 42"
 
-# Real-estate demo (needs a REST backend that returns property results):
-python -m llm_search_kit.examples.real_estate_togo.run
+# Spin up the HTTP server (Flask):
+pip install -e ".[flask]"
+python -m llm_search_kit.examples.flask_server.run
+# then: curl -s localhost:5000/chat -H 'Content-Type: application/json' \
+#         -d '{"message":"red Nike under 80","session_id":"demo"}' | jq
 ```
 
 Tests:
@@ -35,6 +54,8 @@ Tests:
 ```bash
 pytest -q
 ```
+
+---
 
 ## Architecture
 
@@ -54,6 +75,32 @@ SkillRegistry ──► SearchCatalogSkill ──► your CatalogBackend.search(
                  build_relaxation_levels   {items, total}
 ```
 
+You write **two things**:
+
+1. A `SearchSchema` — declare which filters the LLM is allowed to extract
+   (and the order to drop them in if no results are found).
+2. A `CatalogBackend` — one async method `search(filters, query, sort_by,
+   skip, limit) -> {items, total}` against your DB / REST API / vector store.
+
+The kit handles the LLM round-trips, JSON parsing, retries, fallback
+provider, relaxation when results are empty, and assembling the final reply.
+
+For the full step-by-step including a Flask `/chat` endpoint and a real
+Elasticsearch adapter, see [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+
+---
+
+## What ships in `examples/`
+
+| Folder                       | What it shows                                                                 |
+|------------------------------|-------------------------------------------------------------------------------|
+| `amazon_products/`           | A complete domain (schema + soul.md + in-memory SQLite catalog) you can run. |
+| `real_estate_togo/`          | Same but for property search, with both in-memory and HTTP catalog adapters.  |
+| `elasticsearch_catalog/`     | A production-grade `CatalogBackend` against Elasticsearch 8.x.                |
+| `flask_server/`              | A Flask app exposing `POST /chat` and `POST /sessions/<id>/reset`.            |
+
+---
+
 ## Adding a new domain
 
 Copy `llm_search_kit/examples/amazon_products/` and edit three files:
@@ -68,6 +115,8 @@ Copy `llm_search_kit/examples/amazon_products/` and edit three files:
 
 That's it. The agent loop, tool schema generation, JSON parsing, retries,
 fallback provider, and relaxation ladder are all handled for you.
+
+---
 
 ## Public API
 
@@ -95,6 +144,8 @@ result = await engine.process("show me cheap red Nike sneakers")
 print(result["reply"])           # conversational reply
 print(result["data"]["items"])   # the items your backend returned
 ```
+
+---
 
 ## License
 

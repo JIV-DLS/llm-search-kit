@@ -28,9 +28,16 @@ dependencies = [
 examples = [
     "rich>=13.0",
 ]
+flask = [
+    "flask>=3.0",
+]
+elasticsearch = [
+    "elasticsearch[async]>=8,<9",
+]
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
+    "flask>=3.0",
 ]
 
 [project.urls]
@@ -43,6 +50,8 @@ include = ["llm_search_kit*"]
 [tool.setuptools.package-data]
 "llm_search_kit.examples.amazon_products" = ["*.md"]
 "llm_search_kit.examples.real_estate_togo" = ["*.md"]
+"llm_search_kit.examples.flask_server" = ["*.md"]
+"llm_search_kit.examples.elasticsearch_catalog" = ["*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
