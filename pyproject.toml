@@ -52,6 +52,7 @@ include = ["llm_search_kit*"]
 "llm_search_kit.examples.real_estate_togo" = ["*.md"]
 "llm_search_kit.examples.flask_server" = ["*.md"]
 "llm_search_kit.examples.elasticsearch_catalog" = ["*.md"]
+"llm_search_kit.examples.beasyapp_backend" = ["*.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

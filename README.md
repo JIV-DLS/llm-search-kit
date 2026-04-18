@@ -20,12 +20,15 @@ plug it into any catalog: products, jobs, recipes, anything searchable.
 | What you want to do                                              | Open this                                                                                |
 |------------------------------------------------------------------|------------------------------------------------------------------------------------------|
 | **Just see it work** in 30 seconds, zero infra                  | `python -m llm_search_kit.examples.amazon_products.run` (in-memory SQLite)                |
+| **I already have a Spring/Express/Django search endpoint, just put a chat in front of it** | Read **[`docs/INTEGRATION_BEASY.md`](docs/INTEGRATION_BEASY.md)** + copy `examples/beasyapp_backend/` |
 | **Plug it into my own database** (Postgres / Mongo / Elastic…)  | Read **[`docs/INTEGRATION.md`](docs/INTEGRATION.md)** + copy `examples/elasticsearch_catalog/` |
 | **Expose it as an HTTP API** for my frontend                     | Copy `examples/flask_server/` → `python -m llm_search_kit.examples.flask_server.run`     |
 | **Real-estate** style search, with an HTTP backend already      | `examples/real_estate_togo/`                                                              |
 | **Add a non-search skill** (compare, recommend, summarise)      | `llm_search_kit/agent/base_skill.py`                                                      |
 
-> 📘 **If you have an existing Amazon-like app and you don't know where to start: read [`docs/INTEGRATION.md`](docs/INTEGRATION.md) first.** It is a step-by-step cookbook with a worked Flask + Elasticsearch example matching exactly that situation.
+> 📘 **If you have an existing Amazon-like app with its own search endpoint: read [`docs/INTEGRATION_BEASY.md`](docs/INTEGRATION_BEASY.md) first.** It walks through wiring the kit in front of an existing Spring Boot `POST /api/v1/listings/search` endpoint, complete with PII scrubbing and 9 live integration tests.
+>
+> 📘 **If you're starting from a raw database (Postgres / Mongo / Elastic): read [`docs/INTEGRATION.md`](docs/INTEGRATION.md).** Step-by-step cookbook with a worked Flask + Elasticsearch example.
 
 ---
 
@@ -97,6 +100,7 @@ Elasticsearch adapter, see [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
 | `amazon_products/`           | A complete domain (schema + soul.md + in-memory SQLite catalog) you can run. |
 | `real_estate_togo/`          | Same but for property search, with both in-memory and HTTP catalog adapters.  |
 | `elasticsearch_catalog/`     | A production-grade `CatalogBackend` against Elasticsearch 8.x.                |
+| `beasyapp_backend/`          | Real-world adapter: kit ↔ existing Spring Boot `POST /api/v1/listings/search`. PII-scrubbed; covered by 28 unit tests + 9 live tests. |
 | `flask_server/`              | A Flask app exposing `POST /chat` and `POST /sessions/<id>/reset`.            |
 
 ---
