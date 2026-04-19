@@ -25,6 +25,19 @@ ENV/
 .env.local
 .env.*.local
 
+# Local secret scratchpads — anything matching these patterns is
+# someone pasting a key/token into a quick file. Never push.
+*clé*
+*cle_a_ne_pas*
+*secret*.txt
+*secret*.md
+*api_key*
+*apikey*
+*_creds
+*credentials*
+*.key
+*.pem
+
 # Testing / coverage
 .pytest_cache/
 .coverage
