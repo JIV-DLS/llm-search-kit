@@ -105,6 +105,21 @@ class AgentEngine:
         """Register a skill on the underlying registry. Convenience method."""
         self._registry.register(skill)
 
+    def register_skills(self, skills) -> None:
+        """Register every skill in ``skills`` (iterable). Convenience method."""
+        self._registry.register_many(skills)
+
+    def discover_skills(self, source) -> List[str]:
+        """Auto-discover skills from a module or dotted path.
+
+        Equivalent to ``self._registry.discover(source)``. See
+        :meth:`SkillRegistry.discover` for the full contract.
+
+        Returns the list of skill names that were registered, so callers
+        can assert on it in tests or print it at startup.
+        """
+        return self._registry.discover(source)
+
     @property
     def available_skills(self) -> List[str]:
         """Names of every currently registered skill."""

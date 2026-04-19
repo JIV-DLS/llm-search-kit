@@ -1,9 +1,14 @@
-"""Ready-to-run Flask chat service backed by the Beasyapp Spring backend.
+"""EXAMPLE — Beasyapp-specific Flask chat service.
 
-This is the single entry point referenced from ``GETTING_STARTED.md``. It
+⚠️ This file is an EXAMPLE for the Beasyapp Spring backend. **DO NOT
+edit it for your own project**: copy
+``llm_search_kit/examples/starter/`` instead and adapt that.
+
+What this file is
+-----------------
+The single entry point referenced from ``GETTING_STARTED.md``. It
 combines the generic :func:`llm_search_kit.examples.flask_server.app.create_app`
-factory with the :class:`BeasyappCatalog` adapter so the only thing the
-operator needs to do is::
+factory with the :class:`BeasyappCatalog` adapter so the operator can::
 
     cp .env.example .env  # set LLM_API_KEY etc.
     python -m llm_search_kit.examples.beasy_service \
@@ -18,8 +23,11 @@ Endpoints exposed (inherited from ``flask_server``):
     ``{reply, products, meta}``.
   * ``POST /sessions/<session_id>/reset`` — wipe a session's history.
 
-For a different backend, copy this file and swap ``BeasyappCatalog`` for
-your own ``CatalogBackend``.
+For a different backend
+-----------------------
+Read ``docs/ADDING_SKILLS.md`` and copy ``examples/starter/`` — that's
+the canonical "no-search-catalog, just a few @skill functions" template
+that takes ~30 lines to wire a brand new project.
 """
 from __future__ import annotations
 

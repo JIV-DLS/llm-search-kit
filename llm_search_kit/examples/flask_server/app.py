@@ -20,7 +20,8 @@ import asyncio
 import logging
 import os
 from collections import defaultdict, deque
-from typing import Any, Deque, Dict, Iterable, Optional
+from types import ModuleType
+from typing import Any, Deque, Dict, Iterable, Optional, Union
 
 try:
     from flask import Flask, Response, jsonify, request
@@ -89,6 +90,8 @@ def create_app(
     max_relaxed_total: Optional[int] = 50,
     max_relaxed_growth_factor: float = 5.0,
     extra_skills: Optional[Iterable[BaseSkill]] = None,
+    skills_module: Optional[Union[str, ModuleType]] = None,
+    enable_default_search_skill: bool = True,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -111,6 +114,18 @@ def create_app(
         automatically — no prompt changes required. See
         ``examples/beasyapp_backend/categories_skill.py`` for a worked
         example.
+    skills_module:
+        Optional Python module (or its dotted path, e.g.
+        ``"my_app.skills"``) to scan for ``@skill``-decorated functions
+        and ``BaseSkill`` instances. Discovered skills are registered
+        in addition to ``extra_skills``. This is the **recommended path
+        for new projects**: drop your tools in one module and pass it
+        here — adding a tool then never requires touching this file.
+    enable_default_search_skill:
+        If ``True`` (default), the kit registers its built-in
+        :class:`SearchCatalogSkill` wired to ``catalog`` + ``schema``.
+        Set to ``False`` if you only want your own skills (e.g. when
+        building a non-search assistant).
     """
     app = Flask(__name__)
 
@@ -124,16 +139,22 @@ def create_app(
         )
         llm_client = build_default_llm_client()
 
-    skill  = SearchCatalogSkill(
-        schema=schema,
-        backend=catalog,
-        max_relaxed_total=max_relaxed_total,
-        max_relaxed_growth_factor=max_relaxed_growth_factor,
-    )
     engine = AgentEngine(llm_client=llm_client, system_prompt=system_prompt)
-    engine.register_skill(skill)
-    for extra in (extra_skills or ()):
-        engine.register_skill(extra)
+
+    if enable_default_search_skill:
+        engine.register_skill(SearchCatalogSkill(
+            schema=schema,
+            backend=catalog,
+            max_relaxed_total=max_relaxed_total,
+            max_relaxed_growth_factor=max_relaxed_growth_factor,
+        ))
+
+    if extra_skills:
+        engine.register_skills(extra_skills)
+
+    if skills_module is not None:
+        discovered = engine.discover_skills(skills_module)
+        logger.info("Auto-discovered skills from %s: %s", skills_module, discovered)
 
     # In-memory session store. **Replace with Redis** for multi-process deployments.
     sessions: Dict[str, Deque[Dict[str, str]]] = defaultdict(

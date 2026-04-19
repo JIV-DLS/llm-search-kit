@@ -13,6 +13,19 @@
 
 ---
 
+## Two paths — pick yours in 30 seconds
+
+| If you want… | Read… | Files you maintain |
+|---|---|---|
+| **A few custom tools** (currency converter, customer lookup, weather check, …) and **no built-in product search** | [`docs/ADDING_SKILLS.md`](docs/ADDING_SKILLS.md) — copy [`examples/starter/`](llm_search_kit/examples/starter/), takes 5 minutes | `my_skills.py` + a 30-line `service.py` |
+| **Natural-language product search** over your catalog (Elasticsearch / Spring REST / SQL / anything) — you want the kit's `search_catalog` skill on top of YOUR backend | The rest of this page (Beasyapp is the worked example) | A `CatalogBackend`, a `SearchSchema`, and the wiring shown below |
+
+The two paths combine cleanly: nothing stops you from running the
+search skill **and** a few `@skill` functions side by side. See
+[`docs/ADDING_SKILLS.md`](docs/ADDING_SKILLS.md) for the recipe.
+
+---
+
 ## Table of contents
 
 1. [Install](#1-install)
