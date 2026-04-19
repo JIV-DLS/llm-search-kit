@@ -31,6 +31,7 @@ except ImportError as exc:  # pragma: no cover -- the CLI prints a friendlier er
 
 from llm_search_kit import AgentEngine, BaseLLMClient, SearchCatalogSkill
 from llm_search_kit.config import assert_llm_credentials, build_default_llm_client
+from llm_search_kit.llm.openai_compat import UnsupportedToolingError
 from llm_search_kit.search.backend import CatalogBackend
 from llm_search_kit.search.schema import SearchSchema
 
@@ -152,6 +153,16 @@ def create_app(
                 conversation_history=history,
                 context=context,
             ))
+        except UnsupportedToolingError as exc:
+            # Misconfiguration, not a runtime failure: the configured
+            # model can't do tool calling, which the kit hard-requires.
+            # Surface the actionable hint so devs see it in the logs
+            # AND in the HTTP response (instead of an opaque 500).
+            logger.error("Unsupported tooling on session %s: %s", session_id, exc)
+            return jsonify(
+                error="model_unsupported_tooling",
+                message=str(exc),
+            ), 422
         except Exception:
             logger.exception("Agent processing failed for session %s", session_id)
             return jsonify(

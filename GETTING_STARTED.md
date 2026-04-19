@@ -177,12 +177,28 @@ cp .env.example .env
 $EDITOR .env             # paste the three values from your provider
 ```
 
-> **Ollama users:** `LLM_API_KEY` can be left empty. The kit auto-detects
-> `localhost`, `127.0.0.1` and `*.local` hostnames as keyless and won't
-> refuse to start. Don't forget the `/v1` suffix on `LLM_BASE_URL`, and pick
-> a model with tool-calling support (`qwen2.5:1.5b`, `qwen2.5:7b`) — see
-> the [Troubleshooting](#9-troubleshooting) section if the agent never calls
-> your skill.
+> **Ollama users — read this once, save yourself an hour.**
+>
+> 1. `LLM_API_KEY` can be left **empty**. The kit auto-detects
+>    `localhost` / `127.0.0.1` / `*.local` as keyless. Do **not** put
+>    a placeholder like `ollama` or `none` — leave it blank.
+> 2. Don't forget the **`/v1` suffix** on `LLM_BASE_URL`. Without it
+>    Ollama returns `404 page not found` and the kit gives up.
+> 3. **Pick a tool-capable model.** llm-search-kit *requires* function
+>    calling. The default Ollama models (`llama3`, `llama2`, `mistral`,
+>    `gemma`, `phi3`, `deepseek-r1`) **do not** support tools and will
+>    return:
+>    `HTTP 400 ... "<model> does not support tools"`.
+>    Verified-good families:
+>    `qwen2.5`, `qwen3`, `llama3.1`, `llama3.2`, `llama3.3`,
+>    `mistral-nemo`, `mistral-small`, `command-r`, `hermes3`,
+>    `firefunction`, `smollm2`.
+>    Recommended starter:
+>    ```bash
+>    ollama pull qwen2.5:1.5b      # ~1 GB, fast, tool-capable
+>    ```
+> If you ignore #3 the kit now stops on the **first** request with a
+> 422 carrying the exact list above, instead of looping silently.
 
 Verify it works with a single one-shot question (no service yet, just the CLI):
 
@@ -495,7 +511,9 @@ When you're ready to put this in front of real users:
 | Symptom                                                          | Fix                                                                                                                                                              |
 |------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `LLM_API_KEY is not set and LLM_BASE_URL points to a remote provider` | Step 5. Run `cp .env.example .env` and paste a real key, **or** point `LLM_BASE_URL` at a local server (Ollama at `http://localhost:11434/v1`) which doesn't need a key. |
-| Ollama: agent answers but never calls the search skill           | The model you picked doesn't support tool-calling. Switch `LLM_MODEL` to `qwen2.5:1.5b` or `qwen2.5:7b` (`ollama pull qwen2.5:1.5b`).                            |
+| Ollama: `HTTP 400 ... "<model> does not support tools"` (or `/chat` returns 422 `model_unsupported_tooling`) | Your model can't do function calling. Switch `LLM_MODEL` to a tool-capable family: `qwen2.5:1.5b`, `qwen2.5:7b`, `llama3.1:8b`, `llama3.2:3b`, `mistral-nemo`, `command-r`, `hermes3`, `smollm2`. Then `ollama pull <that-model>`. The 422 response body lists this verbatim. |
+| Ollama: agent answers but never calls the search skill           | Same root cause as above — Ollama silently degrades for some models instead of erroring. Switch to `qwen2.5:1.5b`.                                                |
+| `RuntimeError: Event loop is closed` from `httpx`                | Pre-0.1.x bug — the LLM client cached an `httpx.AsyncClient` across the per-request event loops Flask creates. Fixed: each request now opens its own client. Pull latest `main`. |
 | Ollama: `404 page not found` from the LLM                        | You forgot the `/v1` suffix on `LLM_BASE_URL`. It must be `http://localhost:11434/v1`, not `http://localhost:11434`.                                            |
 | Ollama: requests hang for minutes / system swaps                 | The model is too big for your RAM. Switch to `qwen2.5:1.5b` (≈1 GB) instead of `qwen2.5:7b` (≈5 GB) or any 70B variant.                                          |
 | `BeasyappAPIError: HTTP 502 / 503 / 504`                         | Your backend is down or the ngrok tunnel expired. Restart it. Re-run step 2 to confirm.                                                                          |

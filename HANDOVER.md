@@ -177,15 +177,23 @@ moins pour prod sauf si tu as une bonne GPU.
 
 1. **`LLM_API_KEY` peut rester vide.** Le kit détecte automatiquement les
    serveurs locaux (`localhost`, `127.0.0.1`, `*.local`) et ne réclame pas
-   de clé. La valeur littérale `ollama` marche aussi si tu préfères
-   en avoir une.
+   de clé. Laisse vraiment vide — pas de placeholder.
 2. **N'oublie pas le `/v1`** à la fin de `LLM_BASE_URL`. Sans ça tu tapes
-   l'API native d'Ollama (`/api/chat`), pas l'endpoint OpenAI-compat.
-3. **Tous les modèles ne supportent pas le tool-calling.** `qwen2.5:1.5b`
-   et `qwen2.5:7b` le supportent ; `llama3.2:1b` non. Si l'agent ne
-   semble jamais appeler ton skill, c'est probablement ça.
+   l'API native d'Ollama (`/api/chat`) et tu reçois `404 page not found`.
+3. **llm-search-kit exige le tool-calling.** Beaucoup de modèles Ollama
+   répondent `HTTP 400 "<modèle> does not support tools"` :
+   - ❌ ne marchent pas : `llama3`, `llama2`, `mistral` (sans suffixe),
+     `gemma`, `phi3`, `deepseek-r1`.
+   - ✅ marchent : `qwen2.5`, `qwen3`, `llama3.1`, `llama3.2`, `llama3.3`,
+     `mistral-nemo`, `mistral-small`, `command-r`, `hermes3`,
+     `firefunction`, `smollm2`.
+   Si tu utilises un modèle non compatible, le serveur Flask te répond
+   maintenant un **HTTP 422 `model_unsupported_tooling`** avec la liste
+   ci-dessus dans le `message`, donc tu vois le fix tout de suite (fini
+   le `LLM returned no response (iter 1)` qui boucle).
 
-Pour pull un modèle : `ollama pull qwen2.5:1.5b`.
+Pour pull un modèle léger qui marche : `ollama pull qwen2.5:1.5b` (~1 GB,
+rapide même sur un Mac M1/M2 ; `qwen2.5:7b` si tu as ≥8 GB de RAM libre).
 
 ---
 
