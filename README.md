@@ -1,5 +1,10 @@
 # llm-search-kit
 
+> **Integrating this into an existing backend (e.g. Beasyapp)?** Open
+> **[`HANDOVER.md`](HANDOVER.md)** first — single self-contained file
+> with the proof-of-work, the curl examples, and the env vars to hook
+> up your own LLM provider. No need to read anything else.
+
 A small, dependency-light, **domain-agnostic agentic LLM search kit**. It gives
 you a tool-calling loop that turns a user's natural-language question into
 structured filters, calls *your* catalog backend, applies progressive filter
