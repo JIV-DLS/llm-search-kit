@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv as _load_dotenv
@@ -31,6 +32,72 @@ def llm_api_key() -> str:
 
 def llm_model() -> str:
     return _env("LLM_MODEL", "gpt-4o-mini") or "gpt-4o-mini"
+
+
+# Hostnames whose servers serve OpenAI-compatible endpoints **without**
+# requiring an API key. Anything matching here is treated as "no key
+# needed" so the CLI / examples don't refuse to start.
+_KEYLESS_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "0.0.0.0",
+    "host.docker.internal",
+    "ollama",  # common docker-compose service name
+    "vllm",
+}
+
+
+def llm_provider_requires_key(base_url: Optional[str] = None) -> bool:
+    """Return True if the configured LLM provider needs an API key.
+
+    Local OpenAI-compatible runtimes (Ollama, llama.cpp ``--api``,
+    self-hosted vLLM, etc.) accept calls without authentication, so
+    the CLI shouldn't refuse to start when ``LLM_API_KEY`` is empty
+    in those setups. We detect them by inspecting ``LLM_BASE_URL``:
+    anything pointing to localhost, ``127.0.0.1`` or a hostname in
+    :data:`_KEYLESS_HOSTS`, or any URL whose hostname ends with
+    ``.local`` or ``.lan``, is treated as keyless.
+    """
+    url = base_url if base_url is not None else llm_base_url()
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return True
+    if host in _KEYLESS_HOSTS:
+        return False
+    if host.endswith(".local") or host.endswith(".lan"):
+        return False
+    return True
+
+
+def assert_llm_credentials(*, hint: str = "") -> None:
+    """Fail fast with a clear message when the LLM cannot be called.
+
+    Raises :class:`SystemExit` with a single, copy-pasteable message
+    rather than letting the underlying HTTP client bubble up a less
+    actionable ``401`` later. Safe to call at process start of any
+    example / script.
+
+    Skips the check when the configured provider is local (Ollama,
+    vLLM, llama.cpp, etc.) since those don't require a key.
+    """
+    if not llm_provider_requires_key():
+        return
+    if llm_api_key():
+        return
+    msg = (
+        "LLM_API_KEY is not set and LLM_BASE_URL points to a remote "
+        f"provider ({llm_base_url()!r}) that needs an API key.\n"
+        "Either:\n"
+        "  - copy .env.example to .env and fill in LLM_API_KEY, or\n"
+        "  - export LLM_API_KEY=<your key> in this shell, or\n"
+        "  - point LLM_BASE_URL at a local Ollama / vLLM / llama.cpp\n"
+        "    server (e.g. http://localhost:11434/v1 for Ollama) — those\n"
+        "    don't need a key."
+    )
+    if hint:
+        msg = f"{msg}\n\n{hint}"
+    raise SystemExit(msg)
 
 
 def llm_fallback_base_url() -> Optional[str]:

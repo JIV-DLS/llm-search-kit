@@ -81,10 +81,12 @@ async def _async_main(args: argparse.Namespace) -> None:
             await _probe(catalog, args.query or "samsung")
             return
 
-        if not llm_api_key():
-            raise SystemExit(
-                "LLM_API_KEY is not set. Copy .env.example to .env and fill it in."
-            )
+        from llm_search_kit.config import assert_llm_credentials
+
+        assert_llm_credentials(
+            hint="If you're hitting Ollama locally, make sure LLM_BASE_URL "
+                 "is http://localhost:11434/v1 (mind the /v1 suffix)."
+        )
 
         llm    = build_default_llm_client()
         skill  = SearchCatalogSkill(schema=build_schema(), backend=catalog)

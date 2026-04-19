@@ -686,10 +686,15 @@ def main() -> None:
                         "or for fast offline-ish leaderboard runs.")
     args = p.parse_args()
 
-    if not llm_api_key():
-        print(_color(
-            "LLM_API_KEY is not set. Copy .env.example -> .env and fill it in, "
-            "or export LLM_API_KEY=<your key> in this shell.", "31"))
+    from llm_search_kit.config import assert_llm_credentials
+
+    try:
+        assert_llm_credentials(
+            hint="If you're hitting Ollama locally, make sure LLM_BASE_URL "
+                 "is http://localhost:11434/v1 (mind the /v1 suffix)."
+        )
+    except SystemExit as exc:
+        print(_color(str(exc), "31"))
         sys.exit(2)
 
     scenarios = SCENARIOS

@@ -166,12 +166,26 @@ LLM_API_KEY=sk-or-...
 
 ```env
 LLM_BASE_URL=http://localhost:11434/v1
-LLM_MODEL=qwen2.5:7b
-LLM_API_KEY=ollama
+LLM_MODEL=qwen2.5:1.5b
+LLM_API_KEY=
 ```
 
 → Gratuit + offline. Plus lent, qualité dépend du modèle. OK pour dev,
 moins pour prod sauf si tu as une bonne GPU.
+
+**3 pièges fréquents avec Ollama** (à connaître avant de râler) :
+
+1. **`LLM_API_KEY` peut rester vide.** Le kit détecte automatiquement les
+   serveurs locaux (`localhost`, `127.0.0.1`, `*.local`) et ne réclame pas
+   de clé. La valeur littérale `ollama` marche aussi si tu préfères
+   en avoir une.
+2. **N'oublie pas le `/v1`** à la fin de `LLM_BASE_URL`. Sans ça tu tapes
+   l'API native d'Ollama (`/api/chat`), pas l'endpoint OpenAI-compat.
+3. **Tous les modèles ne supportent pas le tool-calling.** `qwen2.5:1.5b`
+   et `qwen2.5:7b` le supportent ; `llama3.2:1b` non. Si l'agent ne
+   semble jamais appeler ton skill, c'est probablement ça.
+
+Pour pull un modèle : `ollama pull qwen2.5:1.5b`.
 
 ---
 

@@ -170,12 +170,19 @@ one (in order of cheapest-to-try-first):
 | **Groq**     | https://console.groq.com/keys                       | ✅ generous             | `LLM_BASE_URL=https://api.groq.com/openai/v1`<br>`LLM_MODEL=llama-3.1-8b-instant`<br>`LLM_API_KEY=gsk_...` |
 | **OpenAI**   | https://platform.openai.com/api-keys                | ❌ paid only            | `LLM_BASE_URL=https://api.openai.com/v1`<br>`LLM_MODEL=gpt-4o-mini`<br>`LLM_API_KEY=sk-...`                |
 | **OpenRouter** | https://openrouter.ai/keys                       | ✅ small free credit    | `LLM_BASE_URL=https://openrouter.ai/api/v1`<br>`LLM_MODEL=meta-llama/llama-3.1-8b-instruct:free`<br>`LLM_API_KEY=sk-or-...` |
-| **Ollama**   | local                                               | ✅ free, your hardware  | `LLM_BASE_URL=http://localhost:11434/v1`<br>`LLM_MODEL=llama3.2`<br>`LLM_API_KEY=ollama`                   |
+| **Ollama**   | local                                               | ✅ free, your hardware  | `LLM_BASE_URL=http://localhost:11434/v1`<br>`LLM_MODEL=qwen2.5:1.5b`<br>`LLM_API_KEY=` *(empty — see Ollama notes below)* |
 
 ```bash
 cp .env.example .env
 $EDITOR .env             # paste the three values from your provider
 ```
+
+> **Ollama users:** `LLM_API_KEY` can be left empty. The kit auto-detects
+> `localhost`, `127.0.0.1` and `*.local` hostnames as keyless and won't
+> refuse to start. Don't forget the `/v1` suffix on `LLM_BASE_URL`, and pick
+> a model with tool-calling support (`qwen2.5:1.5b`, `qwen2.5:7b`) — see
+> the [Troubleshooting](#9-troubleshooting) section if the agent never calls
+> your skill.
 
 Verify it works with a single one-shot question (no service yet, just the CLI):
 
@@ -487,7 +494,10 @@ When you're ready to put this in front of real users:
 
 | Symptom                                                          | Fix                                                                                                                                                              |
 |------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `LLM_API_KEY is not set`                                         | Step 5. Run `cp .env.example .env` and paste a real key.                                                                                                        |
+| `LLM_API_KEY is not set and LLM_BASE_URL points to a remote provider` | Step 5. Run `cp .env.example .env` and paste a real key, **or** point `LLM_BASE_URL` at a local server (Ollama at `http://localhost:11434/v1`) which doesn't need a key. |
+| Ollama: agent answers but never calls the search skill           | The model you picked doesn't support tool-calling. Switch `LLM_MODEL` to `qwen2.5:1.5b` or `qwen2.5:7b` (`ollama pull qwen2.5:1.5b`).                            |
+| Ollama: `404 page not found` from the LLM                        | You forgot the `/v1` suffix on `LLM_BASE_URL`. It must be `http://localhost:11434/v1`, not `http://localhost:11434`.                                            |
+| Ollama: requests hang for minutes / system swaps                 | The model is too big for your RAM. Switch to `qwen2.5:1.5b` (≈1 GB) instead of `qwen2.5:7b` (≈5 GB) or any 70B variant.                                          |
 | `BeasyappAPIError: HTTP 502 / 503 / 504`                         | Your backend is down or the ngrok tunnel expired. Restart it. Re-run step 2 to confirm.                                                                          |
 | `BeasyappAPIError: non-JSON body`                                | The backend returned HTML (often an ngrok warning page). Make sure your custom client also sends `ngrok-skip-browser-warning: true` — the adapter does by default. |
 | `httpx.ConnectError: All connection attempts failed`             | Wrong `--beasy-url` or your machine can't reach it. `curl` it from the same shell first.                                                                         |
