@@ -1,19 +1,28 @@
 """Observer pattern: pluggable hooks for the agent loop.
 
-Inspired by LangChain ``BaseCallbackHandler`` and OpenAI Agents SDK
-``RunHooks``. Lets callers observe (and only observe — hooks must not
-mutate state) every interesting moment in ``AgentEngine.process``:
+Role in the architecture
+------------------------
+This module is the **observability sidecar** of :class:`AgentEngine`.
+The engine fires lifecycle events (LLM round-trip, tool dispatch,
+final reply…) at every interesting moment of ``process()``. Hooks
+let callers plug Datadog, Langfuse, OpenTelemetry, or a chat-UI
+streaming layer **without touching engine code**.
 
-* iteration boundaries (``on_iteration_start``, ``on_iteration_end``);
-* the LLM round-trip (``on_llm_start``, ``on_llm_end``);
-* every tool dispatch (``on_tool_start``, ``on_tool_end``);
-* the final answer (``on_final_reply``);
-* unexpected errors (``on_error``).
+Inspired by ``langchain.BaseCallbackHandler`` and OpenAI Agents SDK
+``RunHooks``.
 
-Hooks are *additive*: register many at once with ``CompositeHooks``.
-The engine calls every hook with ``await``; exceptions raised inside
-a hook are caught and logged (an instrumentation bug must never break
-the user-facing chat).
+Lifecycle events fired by ``AgentEngine.process``
+-------------------------------------------------
+* ``on_iteration_start`` / ``on_iteration_end`` — ReAct loop boundaries
+* ``on_llm_start``        / ``on_llm_end``       — single LLM round-trip
+* ``on_tool_start``       / ``on_tool_end``      — single tool dispatch
+* ``on_final_reply``                             — when a reply is produced
+* ``on_error``                                   — uncaught engine exception
+
+Three impls are shipped:
+  * :class:`NoOpHooks`     — default; override only the events you need
+  * :class:`CompositeHooks` — fan-out to many hooks; swallows per-hook errors
+  * :class:`LoggingHooks`  — structured logs at every step (zero-dep tracing)
 
 Why a Protocol and not an ABC?
 ------------------------------
@@ -25,7 +34,6 @@ all eight.
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
 from .base_skill import SkillResult
@@ -33,12 +41,19 @@ from .base_skill import SkillResult
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# Public surface — the Protocol every hook must conform to
+# =============================================================================
+
+
 @runtime_checkable
 class AgentHooks(Protocol):
     """Lifecycle hooks fired by ``AgentEngine.process``.
 
-    Every method is async to keep the engine fully non-blocking;
-    if you have nothing to do for a given event simply ``return``.
+    Every method is async to keep the engine fully non-blocking; if you
+    have nothing to do for a given event simply ``return``. Subclass
+    :class:`NoOpHooks` instead of implementing this Protocol from
+    scratch — it gives you no-op defaults for every event.
     """
 
     async def on_iteration_start(
@@ -74,6 +89,11 @@ class AgentHooks(Protocol):
     async def on_error(self, exc: BaseException) -> None: ...
 
 
+# =============================================================================
+# Default implementation: no-op everywhere (safe to extend)
+# =============================================================================
+
+
 class NoOpHooks:
     """Default ``AgentHooks`` implementation: every method is a no-op.
 
@@ -85,18 +105,54 @@ class NoOpHooks:
                 metrics.timing(f"agent.tool.{skill}", latency_ms)
     """
 
-    async def on_iteration_start(self, iteration, messages): return None
-    async def on_llm_start(self, iteration, messages, tools): return None
-    async def on_llm_end(self, iteration, response, latency_ms): return None
-    async def on_tool_start(self, skill, params, tool_call_id): return None
-    async def on_tool_end(self, skill, params, tool_call_id, result, latency_ms): return None
-    async def on_iteration_end(self, iteration): return None
-    async def on_final_reply(self, reply, total_iterations, tool_calls): return None
-    async def on_error(self, exc): return None
+    async def on_iteration_start(
+        self, iteration: int, messages: List[Dict[str, Any]],
+    ) -> None:
+        return None
+
+    async def on_llm_start(
+        self, iteration: int, messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        return None
+
+    async def on_llm_end(
+        self, iteration: int, response: Optional[Dict[str, Any]],
+        latency_ms: float,
+    ) -> None:
+        return None
+
+    async def on_tool_start(
+        self, skill: str, params: Dict[str, Any], tool_call_id: str,
+    ) -> None:
+        return None
+
+    async def on_tool_end(
+        self, skill: str, params: Dict[str, Any], tool_call_id: str,
+        result: SkillResult, latency_ms: float,
+    ) -> None:
+        return None
+
+    async def on_iteration_end(self, iteration: int) -> None:
+        return None
+
+    async def on_final_reply(
+        self, reply: str, total_iterations: int,
+        tool_calls: List[Dict[str, Any]],
+    ) -> None:
+        return None
+
+    async def on_error(self, exc: BaseException) -> None:
+        return None
+
+
+# =============================================================================
+# Composite: fan-out to many hooks (Composite pattern)
+# =============================================================================
 
 
 class CompositeHooks(NoOpHooks):
-    """Fan-out: forward every event to a list of hooks.
+    """Forward every event to a list of child hooks (Composite pattern).
 
     Each child hook is called sequentially (so order is deterministic
     and a slow hook can't starve a fast one). If a child raises, the
@@ -113,50 +169,77 @@ class CompositeHooks(NoOpHooks):
         AgentEngine(llm_client=llm, hooks=hooks)
     """
 
-    def __init__(self, hooks: List[AgentHooks]):
-        self._hooks = list(hooks)
+    def __init__(self, hooks: List[AgentHooks]) -> None:
+        self._hooks: List[AgentHooks] = list(hooks)
 
     def add(self, hook: AgentHooks) -> None:
+        """Append a child hook at the end of the fan-out chain."""
         self._hooks.append(hook)
 
-    async def _fanout(self, method: str, *args, **kwargs) -> None:
+    # ----- fan-out wiring ----------------------------------------------------
+
+    async def on_iteration_start(
+        self, iteration: int, messages: List[Dict[str, Any]],
+    ) -> None:
+        await self._fanout("on_iteration_start", iteration, messages)
+
+    async def on_llm_start(
+        self, iteration: int, messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> None:
+        await self._fanout("on_llm_start", iteration, messages, tools)
+
+    async def on_llm_end(
+        self, iteration: int, response: Optional[Dict[str, Any]],
+        latency_ms: float,
+    ) -> None:
+        await self._fanout("on_llm_end", iteration, response, latency_ms)
+
+    async def on_tool_start(
+        self, skill: str, params: Dict[str, Any], tool_call_id: str,
+    ) -> None:
+        await self._fanout("on_tool_start", skill, params, tool_call_id)
+
+    async def on_tool_end(
+        self, skill: str, params: Dict[str, Any], tool_call_id: str,
+        result: SkillResult, latency_ms: float,
+    ) -> None:
+        await self._fanout(
+            "on_tool_end", skill, params, tool_call_id, result, latency_ms,
+        )
+
+    async def on_iteration_end(self, iteration: int) -> None:
+        await self._fanout("on_iteration_end", iteration)
+
+    async def on_final_reply(
+        self, reply: str, total_iterations: int,
+        tool_calls: List[Dict[str, Any]],
+    ) -> None:
+        await self._fanout("on_final_reply", reply, total_iterations, tool_calls)
+
+    async def on_error(self, exc: BaseException) -> None:
+        await self._fanout("on_error", exc)
+
+    # ----- internal helper ---------------------------------------------------
+
+    async def _fanout(self, method: str, *args: Any) -> None:
+        """Call ``method`` on every child hook, swallowing errors per-child."""
         for hook in self._hooks:
             fn = getattr(hook, method, None)
             if fn is None:
                 continue
             try:
-                await fn(*args, **kwargs)
-            except Exception:  # noqa: BLE001
+                await fn(*args)
+            except Exception:  # noqa: BLE001 — instrumentation must never crash the agent
                 logger.exception(
                     "[HOOKS] %s.%s raised; continuing.",
                     type(hook).__name__, method,
                 )
 
-    async def on_iteration_start(self, iteration, messages):
-        await self._fanout("on_iteration_start", iteration, messages)
 
-    async def on_llm_start(self, iteration, messages, tools):
-        await self._fanout("on_llm_start", iteration, messages, tools)
-
-    async def on_llm_end(self, iteration, response, latency_ms):
-        await self._fanout("on_llm_end", iteration, response, latency_ms)
-
-    async def on_tool_start(self, skill, params, tool_call_id):
-        await self._fanout("on_tool_start", skill, params, tool_call_id)
-
-    async def on_tool_end(self, skill, params, tool_call_id, result, latency_ms):
-        await self._fanout(
-            "on_tool_end", skill, params, tool_call_id, result, latency_ms,
-        )
-
-    async def on_iteration_end(self, iteration):
-        await self._fanout("on_iteration_end", iteration)
-
-    async def on_final_reply(self, reply, total_iterations, tool_calls):
-        await self._fanout("on_final_reply", reply, total_iterations, tool_calls)
-
-    async def on_error(self, exc):
-        await self._fanout("on_error", exc)
+# =============================================================================
+# Built-in observability: structured logs at every step
+# =============================================================================
 
 
 class LoggingHooks(NoOpHooks):
@@ -165,20 +248,24 @@ class LoggingHooks(NoOpHooks):
     Useful when you don't have Datadog/Langfuse wired up but still want
     a paper trail in the server logs. Cheap, zero-dep.
 
-        hooks = LoggingHooks()        # INFO level
+    Example::
+
+        hooks = LoggingHooks()         # INFO level
         hooks = LoggingHooks("DEBUG")  # DEBUG level
     """
 
-    def __init__(self, level: str = "INFO"):
+    def __init__(self, level: str = "INFO") -> None:
         self._level = getattr(logging, level.upper(), logging.INFO)
 
-    def _log(self, msg: str, *args: Any) -> None:
-        logger.log(self._level, msg, *args)
-
-    async def on_iteration_start(self, iteration, messages):
+    async def on_iteration_start(
+        self, iteration: int, messages: List[Dict[str, Any]],
+    ) -> None:
         self._log("[HOOKS] iter=%d start (msgs=%d)", iteration, len(messages))
 
-    async def on_llm_end(self, iteration, response, latency_ms):
+    async def on_llm_end(
+        self, iteration: int, response: Optional[Dict[str, Any]],
+        latency_ms: float,
+    ) -> None:
         ok = response is not None
         usage = (response or {}).get("usage") or {}
         self._log(
@@ -187,31 +274,36 @@ class LoggingHooks(NoOpHooks):
             usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
         )
 
-    async def on_tool_start(self, skill, params, tool_call_id):
-        self._log("[HOOKS] tool start %s id=%s params=%s", skill, tool_call_id, params)
+    async def on_tool_start(
+        self, skill: str, params: Dict[str, Any], tool_call_id: str,
+    ) -> None:
+        self._log(
+            "[HOOKS] tool start %s id=%s params=%s",
+            skill, tool_call_id, params,
+        )
 
-    async def on_tool_end(self, skill, params, tool_call_id, result, latency_ms):
+    async def on_tool_end(
+        self, skill: str, params: Dict[str, Any], tool_call_id: str,
+        result: SkillResult, latency_ms: float,
+    ) -> None:
         self._log(
             "[HOOKS] tool end   %s id=%s ok=%s latency=%.1fms",
             skill, tool_call_id, result.success, latency_ms,
         )
 
-    async def on_final_reply(self, reply, total_iterations, tool_calls):
+    async def on_final_reply(
+        self, reply: str, total_iterations: int,
+        tool_calls: List[Dict[str, Any]],
+    ) -> None:
         self._log(
             "[HOOKS] final reply iters=%d tool_calls=%d reply_chars=%d",
             total_iterations, len(tool_calls), len(reply or ""),
         )
 
-    async def on_error(self, exc):
+    async def on_error(self, exc: BaseException) -> None:
         logger.exception("[HOOKS] error: %s", exc)
 
+    # ----- internal helper ---------------------------------------------------
 
-class _Stopwatch:
-    """Tiny helper: ``with _Stopwatch() as sw: ...; sw.elapsed_ms``."""
-
-    def __enter__(self) -> "_Stopwatch":
-        self._t0 = time.monotonic()
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self.elapsed_ms = (time.monotonic() - self._t0) * 1000.0
+    def _log(self, msg: str, *args: Any) -> None:
+        logger.log(self._level, msg, *args)

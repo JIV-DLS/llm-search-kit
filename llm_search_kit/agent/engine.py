@@ -1,17 +1,31 @@
-"""Agent Engine -- core tool-calling loop.
+"""Agent Engine — core ReAct tool-calling loop.
 
-Adapted from ``rede/backend/chatbot-service/agent/engine.py``, stripped of:
-  * metering / authorization / token accounting;
-  * the ``SOUL.md`` auto-loader (the system prompt is now passed in);
-  * "unified mode" / dynamic tool filtering by phase;
-  * state-mutation plumbing;
-  * pipeline phases and rede-specific context keys.
+Role in the architecture
+------------------------
+This module is the **orchestrator** of the kit. Given a user message,
+it drives a multi-turn conversation with the LLM, executes any tools
+the LLM asks for, and returns a final reply.
 
-The remaining algorithm is the standard ReAct-style tool loop:
-  1. Send messages + tool schemas to the LLM.
-  2. If it returns ``tool_calls``, execute each, append results, loop.
-  3. Otherwise return its text content as the final reply.
-  4. Bail out after ``max_iterations`` to avoid infinite loops.
+Collaborators (injected via ``__init__``)
+-----------------------------------------
+* :class:`BaseLLMClient` — the LLM transport (OpenAI-compat).
+* :class:`SkillRegistry` — owns the registered tools.
+* :class:`AgentHooks`   — observability sidecar (default: no-op).
+
+High-level flow (every call to :meth:`AgentEngine.process`)
+-----------------------------------------------------------
+1. Build the conversation messages (system + history + user).
+2. Loop up to ``max_iterations`` times:
+     a. Ask the LLM ``chat_completion(messages, tools)``.
+     b. If it returned ``tool_calls`` → execute them in parallel,
+        append results, loop again.
+     c. Otherwise return its ``content`` as the final reply.
+3. If the loop exhausts without a final reply, surface a graceful
+   "I couldn't finish" message instead of looping forever.
+
+Adapted from ``rede/backend/chatbot-service/agent/engine.py`` — the
+metering / authorization / SOUL-loader / pipeline-phases plumbing was
+intentionally dropped for this kit.
 """
 from __future__ import annotations
 
@@ -28,6 +42,11 @@ from .registry import SkillRegistry
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Defaults & constants
+# =============================================================================
+
 DEFAULT_MAX_ITERATIONS = 10
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_TOOL_CALL_CONCURRENCY = 5
@@ -40,8 +59,24 @@ MSG_MAX_ITERATIONS = (
 )
 
 
+# =============================================================================
+# Public API
+# =============================================================================
+
+
 class AgentEngine:
-    """Tool-calling loop on top of any OpenAI-compatible LLM client."""
+    """ReAct tool-calling loop on top of any OpenAI-compatible LLM client.
+
+    Collaborators
+    -------------
+    llm_client : BaseLLMClient
+        The transport. The engine only ever calls ``chat_completion``.
+    skill_registry : SkillRegistry
+        Holds the available tools. The engine asks for their schemas
+        before each LLM call and dispatches by name.
+    hooks : AgentHooks
+        Observability hooks (no-op by default). See ``hooks.py``.
+    """
 
     def __init__(
         self,
@@ -64,13 +99,18 @@ class AgentEngine:
         self._tool_call_concurrency = max(1, tool_call_concurrency)
         self._hooks: AgentHooks = hooks or NoOpHooks()
 
+    # ----- skill registration ------------------------------------------------
+
     def register_skill(self, skill: BaseSkill) -> None:
-        """Convenience: register a skill on the underlying registry."""
+        """Register a skill on the underlying registry. Convenience method."""
         self._registry.register(skill)
 
     @property
     def available_skills(self) -> List[str]:
+        """Names of every currently registered skill."""
         return self._registry.skill_names
+
+    # ----- main entry point --------------------------------------------------
 
     async def process(
         self,
@@ -80,84 +120,137 @@ class AgentEngine:
     ) -> Dict[str, Any]:
         """Run the agentic loop and return ``{reply, tool_calls, data}``.
 
-        ``conversation_history`` is a list of ``{role, content}`` dicts.
-        ``context`` is forwarded into every skill call as additional kwargs
-        (under the ``__context__`` key) -- useful for passing user_id, locale,
-        auth tokens, etc.
+        Reads top-to-bottom like a table of contents:
+
+            build messages
+              → run ReAct loop (delegates each turn to ``_run_iteration``)
+              → fall back to a graceful message if max iterations hit
+
+        Errors raised inside the loop are reported to ``hooks.on_error``
+        before being re-raised so callers see the real exception.
         """
         context = context or {}
         messages = self._build_messages(user_message, conversation_history)
         tools = self._registry.get_tool_schemas() or None
 
-        all_tool_calls: List[Dict[str, Any]] = []
-        last_data: Optional[Dict[str, Any]] = None
+        run_state = _RunState()
 
         try:
             for iteration in range(1, self._max_iterations + 1):
-                await self._hooks.on_iteration_start(iteration, messages)
-                await self._hooks.on_llm_start(iteration, messages, tools)
-
-                t0 = time.monotonic()
-                response = await self._llm.chat_completion(
-                    messages=messages,
-                    tools=tools,
-                    temperature=self._temperature,
+                done = await self._run_iteration(
+                    iteration, messages, tools, context, run_state,
                 )
-                llm_latency_ms = (time.monotonic() - t0) * 1000.0
-                await self._hooks.on_llm_end(iteration, response, llm_latency_ms)
+                if done:
+                    return run_state.result
 
-                if not response:
-                    logger.error(
-                        "[AGENT] LLM returned no response (iter %d)", iteration,
-                    )
-                    await self._hooks.on_iteration_end(iteration)
-                    result = self._make_result(
-                        MSG_TECHNICAL_ERROR, all_tool_calls, last_data,
-                    )
-                    await self._hooks.on_final_reply(
-                        result["reply"], iteration, all_tool_calls,
-                    )
-                    return result
-
-                choices = response.get("choices") or [{}]
-                message = (choices[0] or {}).get("message", {}) or {}
-
-                tool_calls = message.get("tool_calls") or []
-                if tool_calls:
-                    messages.append(message)
-                    await self._execute_tool_calls(
-                        tool_calls, messages, all_tool_calls, context,
-                    )
-                    if all_tool_calls:
-                        last = all_tool_calls[-1].get("result", {})
-                        if isinstance(last, dict) and last.get("data") is not None:
-                            last_data = last["data"]
-                    await self._hooks.on_iteration_end(iteration)
-                    continue
-
-                reply = message.get("content") or ""
-                await self._hooks.on_iteration_end(iteration)
-                result = self._make_result(reply, all_tool_calls, last_data)
-                await self._hooks.on_final_reply(reply, iteration, all_tool_calls)
-                return result
-
-            logger.warning(
-                "[AGENT] Max iterations (%d) reached", self._max_iterations,
-            )
-            last_reply = ""
-            for msg in reversed(messages):
-                if msg.get("role") == "assistant" and msg.get("content"):
-                    last_reply = msg["content"]
-                    break
-            final_reply = last_reply or MSG_MAX_ITERATIONS
-            result = self._make_result(final_reply, all_tool_calls, last_data)
-            await self._hooks.on_final_reply(
-                final_reply, self._max_iterations, all_tool_calls,
-            )
-            return result
+            return await self._on_max_iterations_reached(messages, run_state)
         except Exception as exc:
             await self._hooks.on_error(exc)
             raise
+
+    # =========================================================================
+    # Internal: one ReAct iteration
+    # =========================================================================
+
+    async def _run_iteration(
+        self,
+        iteration: int,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+        context: Dict[str, Any],
+        run_state: "_RunState",
+    ) -> bool:
+        """Run a single ReAct turn. Returns True if the loop must stop.
+
+        A turn either:
+          * gets ``None`` from the LLM → stop with a technical-error reply;
+          * gets ``tool_calls`` → execute them and continue (returns False);
+          * gets a final ``content`` → stop with that reply.
+        """
+        await self._hooks.on_iteration_start(iteration, messages)
+
+        response = await self._call_llm(iteration, messages, tools)
+        if response is None:
+            await self._finalize_iteration(iteration, run_state, MSG_TECHNICAL_ERROR)
+            return True
+
+        message = self._extract_assistant_message(response)
+        tool_calls = message.get("tool_calls") or []
+
+        if tool_calls:
+            messages.append(message)
+            await self._execute_tool_calls(
+                tool_calls, messages, run_state.all_tool_calls, context,
+            )
+            run_state.refresh_last_data()
+            await self._hooks.on_iteration_end(iteration)
+            return False
+
+        reply = message.get("content") or ""
+        await self._finalize_iteration(iteration, run_state, reply)
+        return True
+
+    async def _call_llm(
+        self,
+        iteration: int,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Wrap one LLM round-trip with start/end hooks and timing."""
+        await self._hooks.on_llm_start(iteration, messages, tools)
+
+        started_at = time.monotonic()
+        response = await self._llm.chat_completion(
+            messages=messages,
+            tools=tools,
+            temperature=self._temperature,
+        )
+        latency_ms = (time.monotonic() - started_at) * 1000.0
+
+        await self._hooks.on_llm_end(iteration, response, latency_ms)
+
+        if response is None:
+            logger.error("[AGENT] LLM returned no response (iter %d)", iteration)
+        return response
+
+    @staticmethod
+    def _extract_assistant_message(response: Dict[str, Any]) -> Dict[str, Any]:
+        """Pull ``response.choices[0].message`` defensively from any provider."""
+        choices = response.get("choices") or [{}]
+        return (choices[0] or {}).get("message", {}) or {}
+
+    async def _finalize_iteration(
+        self,
+        iteration: int,
+        run_state: "_RunState",
+        reply: str,
+    ) -> None:
+        """Emit ``on_iteration_end`` + ``on_final_reply`` and store the result."""
+        run_state.set_result(reply)
+        await self._hooks.on_iteration_end(iteration)
+        await self._hooks.on_final_reply(
+            reply, iteration, run_state.all_tool_calls,
+        )
+
+    async def _on_max_iterations_reached(
+        self,
+        messages: List[Dict[str, Any]],
+        run_state: "_RunState",
+    ) -> Dict[str, Any]:
+        """Graceful exit when the model never produced a final answer."""
+        logger.warning(
+            "[AGENT] Max iterations (%d) reached", self._max_iterations,
+        )
+        last_reply = self._last_assistant_text(messages) or MSG_MAX_ITERATIONS
+        run_state.set_result(last_reply)
+        await self._hooks.on_final_reply(
+            last_reply, self._max_iterations, run_state.all_tool_calls,
+        )
+        return run_state.result
+
+    # =========================================================================
+    # Internal: tool-call fan-out (parallel)
+    # =========================================================================
 
     async def _execute_tool_calls(
         self,
@@ -168,70 +261,101 @@ class AgentEngine:
     ) -> None:
         """Execute every tool call concurrently and append results in order.
 
-        OpenAI / Mammouth / Groq routinely emit several ``tool_calls`` in the
-        same assistant turn (e.g. ``list_categories`` + ``search_catalog`` to
-        cross-reference). Running them sequentially multiplied total latency
-        by N. We now fan them out under a semaphore (default 5) and rejoin
-        results in the original order so the ``tool`` messages line up with
-        the ``tool_call_id``s OpenAI expects.
+        OpenAI / Mammouth / Groq routinely emit several ``tool_calls`` in
+        the same assistant turn (e.g. ``list_categories`` + ``search_catalog``
+        to cross-reference). Running them sequentially multiplied total
+        latency by N. We now fan them out under a semaphore (default 5)
+        and rejoin results in the original order so the ``tool`` messages
+        line up with the ``tool_call_id``s OpenAI expects.
         """
         if not tool_calls:
             return
 
-        sem = asyncio.Semaphore(self._tool_call_concurrency)
-
-        async def _run_one(tc: Dict[str, Any]) -> Dict[str, Any]:
-            func = tc.get("function", {}) or {}
-            skill_name = func.get("name", "")
-            tc_id = tc.get("id", "")
-            try:
-                params = json.loads(func.get("arguments", "{}") or "{}")
-            except json.JSONDecodeError:
-                params = {}
-
-            if context:
-                params.setdefault("__context__", context)
-
-            visible_params = {k: v for k, v in params.items() if k != "__context__"}
-            logger.info("[AGENT] Calling skill: %s(%s)", skill_name, visible_params)
-
-            await self._hooks.on_tool_start(skill_name, visible_params, tc_id)
-            t0 = time.monotonic()
-            async with sem:
-                result = await self._registry.execute_skill(skill_name, params)
-            latency_ms = (time.monotonic() - t0) * 1000.0
-            await self._hooks.on_tool_end(
-                skill_name, visible_params, tc_id, result, latency_ms,
-            )
-
-            return {
-                "tool_call_id": tc_id,
-                "skill": skill_name,
-                "params": visible_params,
-                "result": result.model_dump(),
-            }
-
+        semaphore = asyncio.Semaphore(self._tool_call_concurrency)
         executed = await asyncio.gather(
-            *[_run_one(tc) for tc in tool_calls], return_exceptions=False,
+            *[
+                self._dispatch_one_tool_call(tc, context, semaphore)
+                for tc in tool_calls
+            ],
         )
 
         for entry in executed:
-            all_tool_calls.append({
-                "skill": entry["skill"],
-                "params": entry["params"],
-                "result": entry["result"],
-            })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": entry["tool_call_id"],
-                "content": json.dumps(entry["result"], default=str),
-            })
+            self._record_tool_call(entry, messages, all_tool_calls)
+
+    async def _dispatch_one_tool_call(
+        self,
+        tool_call: Dict[str, Any],
+        context: Dict[str, Any],
+        semaphore: asyncio.Semaphore,
+    ) -> Dict[str, Any]:
+        """Validate, hook-instrument, and run a single tool call."""
+        skill_name, tc_id, params = self._parse_tool_call(tool_call)
+
+        if context:
+            params.setdefault("__context__", context)
+        visible_params = _strip_context(params)
+
+        logger.info("[AGENT] Calling skill: %s(%s)", skill_name, visible_params)
+        await self._hooks.on_tool_start(skill_name, visible_params, tc_id)
+
+        started_at = time.monotonic()
+        async with semaphore:
+            result = await self._registry.execute_skill(skill_name, params)
+        latency_ms = (time.monotonic() - started_at) * 1000.0
+
+        await self._hooks.on_tool_end(
+            skill_name, visible_params, tc_id, result, latency_ms,
+        )
+        return {
+            "tool_call_id": tc_id,
+            "skill": skill_name,
+            "params": visible_params,
+            "result": result.model_dump(),
+        }
+
+    @staticmethod
+    def _parse_tool_call(
+        tool_call: Dict[str, Any],
+    ) -> tuple[str, str, Dict[str, Any]]:
+        """Extract ``(skill_name, tool_call_id, parsed_arguments)``."""
+        function = tool_call.get("function", {}) or {}
+        skill_name = function.get("name", "")
+        tc_id = tool_call.get("id", "")
+        try:
+            params = json.loads(function.get("arguments", "{}") or "{}")
+        except json.JSONDecodeError:
+            params = {}
+        return skill_name, tc_id, params
+
+    @staticmethod
+    def _record_tool_call(
+        entry: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        all_tool_calls: List[Dict[str, Any]],
+    ) -> None:
+        """Append a completed tool call to both the audit log and the
+        assistant↔tool message thread sent back to the LLM."""
+        all_tool_calls.append({
+            "skill": entry["skill"],
+            "params": entry["params"],
+            "result": entry["result"],
+        })
+        messages.append({
+            "role": "tool",
+            "tool_call_id": entry["tool_call_id"],
+            "content": json.dumps(entry["result"], default=str),
+        })
+
+    # =========================================================================
+    # Internal: message building
+    # =========================================================================
 
     def _build_messages(
         self,
         user_message: str,
         history: Optional[List[Dict[str, str]]],
     ) -> List[Dict[str, Any]]:
+        """Compose the [system, ...history, user] message array for the LLM."""
         messages: List[Dict[str, Any]] = []
         if self._system_prompt:
             messages.append({"role": "system", "content": self._system_prompt})
@@ -247,9 +371,51 @@ class AgentEngine:
         return messages
 
     @staticmethod
-    def _make_result(
-        reply: str,
-        tool_calls: List[Dict[str, Any]],
-        data: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        return {"reply": reply, "tool_calls": tool_calls, "data": data}
+    def _last_assistant_text(messages: List[Dict[str, Any]]) -> str:
+        """Find the most recent non-empty assistant message in the thread."""
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant" and msg.get("content"):
+                return msg["content"]
+        return ""
+
+
+# =============================================================================
+# Internal helpers
+# =============================================================================
+
+
+class _RunState:
+    """Mutable per-run state shared between iteration helpers.
+
+    Kept as a small bag rather than scattered locals so the iteration
+    helpers can be plain methods (no closure capture, no positional-arg
+    explosion).
+    """
+
+    def __init__(self) -> None:
+        self.all_tool_calls: List[Dict[str, Any]] = []
+        self.last_data: Optional[Dict[str, Any]] = None
+        self.result: Dict[str, Any] = {
+            "reply": "", "tool_calls": [], "data": None,
+        }
+
+    def refresh_last_data(self) -> None:
+        """Cache the ``data`` payload from the most recent successful tool."""
+        if not self.all_tool_calls:
+            return
+        last = self.all_tool_calls[-1].get("result", {})
+        if isinstance(last, dict) and last.get("data") is not None:
+            self.last_data = last["data"]
+
+    def set_result(self, reply: str) -> None:
+        """Snapshot ``{reply, tool_calls, data}`` for return to the caller."""
+        self.result = {
+            "reply": reply,
+            "tool_calls": self.all_tool_calls,
+            "data": self.last_data,
+        }
+
+
+def _strip_context(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``params`` without the engine-injected ``__context__`` key."""
+    return {k: v for k, v in params.items() if k != "__context__"}
