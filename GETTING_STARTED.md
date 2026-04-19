@@ -398,16 +398,30 @@ The same env vars that drive the chat service drive these tests, so
 swapping providers is one env-var change:
 
 ```bash
-# Default — Technas LLM gateway (Claude Sonnet primary, Gemini fallback):
-LLM_BASE_URL=https://llm.technas.fr/v1
-LLM_MODEL=smart
-LLM_API_KEY=<litellm_master_key>
+# OpenAI (universal default, works out of the box once you have a key):
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=gpt-4o-mini
+LLM_API_KEY=sk-...
 
-# Or any other OpenAI-compatible provider:
+# Groq (fast & cheap, OpenAI-compatible):
 LLM_BASE_URL=https://api.groq.com/openai/v1
-LLM_MODEL=llama-3.1-70b-versatile
+LLM_MODEL=llama-3.3-70b-versatile
 LLM_API_KEY=gsk_...
+
+# OpenRouter (one key, every model — Claude, Gemini, GPT, Llama, etc.):
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=anthropic/claude-3.5-sonnet
+LLM_API_KEY=sk-or-...
+
+# Local Ollama (zero dollars, OpenAI-compatible mode):
+LLM_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=qwen2.5:7b
+LLM_API_KEY=ollama
 ```
+
+> Internal Technas users only: `LLM_BASE_URL=https://llm.technas.fr/v1`
+> with the gateway master key works as a drop-in too. Everyone else,
+> use one of the providers above.
 
 **What to do with the report card:**
 

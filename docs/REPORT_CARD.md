@@ -1,9 +1,11 @@
 # LLM scenario report card
 
-- **Backend**: `https://actinolitic-glancingly-saturnina.ngrok-free.dev`
-- **LLM URL**: `https://llm.technas.fr/v1`
+- **Backend**: `https://actinolitic-glancingly-saturnina.ngrok-free.dev` (Beasyapp Spring Boot)
+- **LLM URL**: `https://llm.technas.fr/v1` (Technas internal LiteLLM gateway)
 - **Run at**: `2026-04-19T12:21:55`
-- **Model**: `mammouth-gpt-4-1-mini`
+- **Model**: `mammouth-gpt-4-1-mini` — Mammouth AI alias for OpenAI's `gpt-4.1-mini`. Equivalent public model: `gpt-4o-mini` on `https://api.openai.com/v1`, or `openai/gpt-4o-mini` via OpenRouter. The kit doesn't care which provider you use.
+
+> Reproduce on your side: `python scripts/run_scenarios.py --backend-url <yours> --out-md docs/REPORT_CARD.md` after setting `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY` to the provider of your choice (see `.env.example`).
 
 | Verdict | Scenario | User message | Filters | Top result | Notes |
 |---|---|---|---|---|---|

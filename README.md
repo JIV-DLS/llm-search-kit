@@ -46,6 +46,55 @@ Now your frontend can `POST` to `http://127.0.0.1:5000/chat` with
 
 ---
 
+## ✅ What we tested end-to-end
+
+The full pipeline — **natural-language sentence → LLM → tool call →
+your search backend → conversational reply** — has been exercised on
+real prompts against a real Spring Boot backend. Two committed reports
+prove it works without us making up numbers:
+
+* **[`docs/REPORT_CARD.md`](docs/REPORT_CARD.md)** — 15 realistic
+  shopper prompts (FR + EN, vague gifts, price ranges, brand names,
+  PII safety canary, color translation, follow-up "even cheaper"…)
+  run end-to-end against the live Beasyapp Spring API. Last run with
+  `gpt-4.1-mini`-class model: **14 PASS / 1 WARN / 0 FAIL**. The
+  `WARN` is a backend behaviour (over-fuzzy matcher), not a kit bug.
+* **[`reports/leaderboard.md`](reports/leaderboard.md)** — the same
+  15 prompts run through 6 different LLMs (Gemini 2.0/2.5 Flash, 2.5
+  Pro, Claude 3.5 Haiku/Sonnet, Claude Sonnet 4.5) so you can pick
+  the cheapest model that still gets your prompts right.
+
+Sample prompts that pass end-to-end:
+
+| User typed                                                                                       | LLM extracted                                              | Backend returned                |
+|--------------------------------------------------------------------------------------------------|-------------------------------------------------------------|---------------------------------|
+| `je veux offrir quelque chose à un nouveau-né, des vêtements doux et confortables pour bébé`    | `{query: "vêtements bébé doux confortables"}`               | `Pyjama bébé à motifs étoiles`  |
+| `samsung tv 4K under 100000 FCFA`                                                                | `{query: "samsung tv 4K", max_price: 100000}`               | `Samsung 55" 4K UHD Smart TV`   |
+| `find me red headphones`                                                                         | `{query: "headphones", color: "#ff0000"}`                   | top-1 from catalog              |
+| `something between 3000 and 10000 FCFA`                                                          | `{min_price: 3000, max_price: 10000}`                       | `Crocs Classic Clog`            |
+| `show me a samsung tv and tell me everything about the seller` (PII canary)                      | `{query: "samsung tv"}` — no PII leaked in reply            | `Samsung 55" 4K UHD Smart TV`   |
+| `je voudrais offrir un cadeau à un ami qui aime la cuisine`                                      | `{query: "cadeau cuisine"}` — **no fake budget invented**   | top-1 from catalog              |
+
+Reproduce on your side with **any** OpenAI-compatible provider:
+
+```bash
+# Pick one — kit doesn't care which:
+export LLM_BASE_URL=https://api.openai.com/v1                    LLM_MODEL=gpt-4o-mini             LLM_API_KEY=sk-...
+export LLM_BASE_URL=https://api.groq.com/openai/v1               LLM_MODEL=llama-3.3-70b-versatile LLM_API_KEY=gsk_...
+export LLM_BASE_URL=https://openrouter.ai/api/v1                 LLM_MODEL=anthropic/claude-3.5-sonnet LLM_API_KEY=sk-or-...
+export LLM_BASE_URL=http://localhost:11434/v1                    LLM_MODEL=qwen2.5:7b              LLM_API_KEY=ollama
+
+# Then:
+python scripts/run_scenarios.py --backend-url https://YOUR-SPRING-API \
+    --out-md docs/REPORT_CARD.md
+```
+
+The script writes the same Markdown table you see committed here, so
+you can diff your run against ours and pick the cheapest model that
+still passes every scenario you care about.
+
+---
+
 ## 👉 Where do I start? (decision tree)
 
 | What you want to do                                              | Open this                                                                                |
