@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List, Dict
 
 from llm_search_kit import AgentEngine, SearchCatalogSkill
-from llm_search_kit.config import build_default_llm_client, llm_api_key
+from llm_search_kit.config import assert_llm_credentials, build_default_llm_client
 
 from .catalog import HttpRealEstateCatalog, InMemoryRealEstateCatalog
 from .schema import build_schema
@@ -68,10 +68,10 @@ async def _run_one(engine: AgentEngine, query: str, history: List[Dict[str, str]
 
 
 async def _async_main(args: argparse.Namespace) -> None:
-    if not llm_api_key():
-        raise SystemExit(
-            "LLM_API_KEY is not set. Copy .env.example to .env and fill it in."
-        )
+    assert_llm_credentials(
+        hint="If you're hitting Ollama locally, make sure LLM_BASE_URL "
+             "is http://localhost:11434/v1 (mind the /v1 suffix)."
+    )
 
     llm = build_default_llm_client()
     catalog = _build_catalog(args.backend)

@@ -30,7 +30,7 @@ except ImportError as exc:  # pragma: no cover -- the CLI prints a friendlier er
     ) from exc
 
 from llm_search_kit import AgentEngine, BaseLLMClient, SearchCatalogSkill
-from llm_search_kit.config import build_default_llm_client, llm_api_key
+from llm_search_kit.config import assert_llm_credentials, build_default_llm_client
 from llm_search_kit.search.backend import CatalogBackend
 from llm_search_kit.search.schema import SearchSchema
 
@@ -107,11 +107,10 @@ def create_app(
     schema  = schema  or build_schema()
 
     if llm_client is None:
-        if not llm_api_key():
-            raise RuntimeError(
-                "LLM_API_KEY is not set. Copy .env.example to .env and fill it in, "
-                "or set the environment variable before starting the server."
-            )
+        assert_llm_credentials(
+            hint="If you're hitting Ollama locally, make sure LLM_BASE_URL "
+                 "is http://localhost:11434/v1 (mind the /v1 suffix)."
+        )
         llm_client = build_default_llm_client()
 
     skill  = SearchCatalogSkill(schema=schema, backend=catalog)

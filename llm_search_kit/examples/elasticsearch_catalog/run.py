@@ -21,7 +21,7 @@ import asyncio
 from typing import Any, Dict, List
 
 from llm_search_kit import AgentEngine, SearchCatalogSkill
-from llm_search_kit.config import build_default_llm_client, llm_api_key
+from llm_search_kit.config import assert_llm_credentials, build_default_llm_client
 
 from ..amazon_products.schema import build_schema
 from .catalog import ElasticsearchCatalog, build_default_index_mapping
@@ -65,8 +65,10 @@ async def _async_main(args: argparse.Namespace) -> None:
             print("Seeded. Re-run with --query \"...\" to ask the agent.")
             return
 
-        if not llm_api_key():
-            raise SystemExit("LLM_API_KEY is not set. Copy .env.example to .env first.")
+        assert_llm_credentials(
+            hint="If you're hitting Ollama locally, make sure LLM_BASE_URL "
+                 "is http://localhost:11434/v1 (mind the /v1 suffix)."
+        )
 
         catalog = ElasticsearchCatalog(es, index=args.index)
         skill   = SearchCatalogSkill(schema=build_schema(), backend=catalog)
