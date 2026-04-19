@@ -20,7 +20,7 @@ import asyncio
 import logging
 import os
 from collections import defaultdict, deque
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, Iterable, Optional
 
 try:
     from flask import Flask, Response, jsonify, request
@@ -29,7 +29,7 @@ except ImportError as exc:  # pragma: no cover -- the CLI prints a friendlier er
         "The flask_server example needs Flask. Install it with: pip install flask"
     ) from exc
 
-from llm_search_kit import AgentEngine, BaseLLMClient, SearchCatalogSkill
+from llm_search_kit import AgentEngine, BaseLLMClient, BaseSkill, SearchCatalogSkill
 from llm_search_kit.config import assert_llm_credentials, build_default_llm_client
 from llm_search_kit.llm.openai_compat import UnsupportedToolingError
 from llm_search_kit.search.backend import CatalogBackend
@@ -88,6 +88,7 @@ def create_app(
     history_size: int = 12,
     max_relaxed_total: Optional[int] = 50,
     max_relaxed_growth_factor: float = 5.0,
+    extra_skills: Optional[Iterable[BaseSkill]] = None,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -103,6 +104,13 @@ def create_app(
         case ``LLM_API_KEY`` MUST be set.
     history_size:
         How many ``(user, assistant)`` message pairs to remember per session.
+    extra_skills:
+        Optional iterable of additional :class:`BaseSkill` instances to
+        register on the engine *in addition to* the default
+        :class:`SearchCatalogSkill`. The LLM will route between them
+        automatically — no prompt changes required. See
+        ``examples/beasyapp_backend/categories_skill.py`` for a worked
+        example.
     """
     app = Flask(__name__)
 
@@ -124,6 +132,8 @@ def create_app(
     )
     engine = AgentEngine(llm_client=llm_client, system_prompt=system_prompt)
     engine.register_skill(skill)
+    for extra in (extra_skills or ()):
+        engine.register_skill(extra)
 
     # In-memory session store. **Replace with Redis** for multi-process deployments.
     sessions: Dict[str, Deque[Dict[str, str]]] = defaultdict(

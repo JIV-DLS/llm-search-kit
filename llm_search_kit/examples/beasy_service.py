@@ -30,6 +30,7 @@ from typing import Optional
 
 from llm_search_kit import BaseLLMClient
 from llm_search_kit.examples.beasyapp_backend.catalog import BeasyappCatalog
+from llm_search_kit.examples.beasyapp_backend.categories_skill import CategoriesSkill
 from llm_search_kit.examples.beasyapp_backend.schema import build_schema
 from llm_search_kit.examples.flask_server.app import create_app as create_flask_app
 
@@ -56,6 +57,7 @@ def make_app(
     soul_path: str = DEFAULT_SOUL_PATH,
     auth_header: Optional[str] = None,
     llm_client: Optional[BaseLLMClient] = None,
+    enable_categories_skill: bool = True,
 ):
     """Build a Flask app wired to the Beasyapp backend.
 
@@ -74,15 +76,33 @@ def make_app(
         ``ResilientLLMClient`` with a fallback provider). When omitted the
         kit reads ``LLM_API_KEY`` / ``LLM_BASE_URL`` / ``LLM_MODEL`` from
         the environment via :func:`llm_search_kit.config.build_default_llm_client`.
+    enable_categories_skill:
+        If True (default), also register the
+        :class:`CategoriesSkill` so the LLM can answer questions like
+        "what categories do you sell?" by hitting
+        ``GET /api/v1/categories`` instead of trying to abuse the
+        ``search_catalog`` tool. Set False if you do not expose
+        that endpoint yet — the agent will simply not have that
+        capability and will fall back to its general knowledge.
+
+        This flag is the canonical example of "adding a tool requires
+        no changes to ``soul.md``": the LLM discovers the new tool
+        purely from its name + description + JSON schema.
     """
     headers = {"Authorization": auth_header} if auth_header else None
     catalog = BeasyappCatalog(base_url=beasy_url, headers=headers)
     schema  = build_schema()
+
+    extra_skills = []
+    if enable_categories_skill:
+        extra_skills.append(CategoriesSkill(base_url=beasy_url, headers=headers))
+
     app = create_flask_app(
         catalog=catalog,
         schema=schema,
         llm_client=llm_client,
         system_prompt=_load_soul(soul_path),
+        extra_skills=extra_skills,
     )
     app.config["BEASY_BACKEND_URL"] = beasy_url
     return app
@@ -129,6 +149,14 @@ def main() -> None:
                    help="Enable Flask debug mode (auto-reload + tracebacks).")
     p.add_argument("--quiet", action="store_true",
                    help="Suppress INFO-level logs.")
+    p.add_argument(
+        "--no-categories-skill", action="store_true",
+        help=(
+            "Do NOT register the CategoriesSkill (default: it IS registered). "
+            "Use this if your Spring backend doesn't expose "
+            "GET /api/v1/categories yet."
+        ),
+    )
     args = p.parse_args()
 
     logging.basicConfig(
@@ -140,6 +168,7 @@ def main() -> None:
         beasy_url=args.beasy_url,
         soul_path=args.soul,
         auth_header=args.auth_header,
+        enable_categories_skill=not args.no_categories_skill,
     )
 
     logger.info("Beasy chat service ready on http://%s:%d", args.host, args.port)

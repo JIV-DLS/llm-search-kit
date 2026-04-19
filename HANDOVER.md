@@ -12,6 +12,9 @@ Salut Armand. Ouvre **uniquement ce fichier**. Il contient :
 7. **Comment ça marche sous le capot** — le tool-calling et la boucle
    agentique, pour ne pas tomber dans le piège *"c'est juste de
    l'extraction de paramètres"*.
+8. **Comment ajouter un 2e tool** sans toucher à `soul.md` — séparation
+   propre des responsabilités + recette copier-coller (avec un
+   exemple complet `list_categories` déjà committé).
 
 Tout le reste de la doc du repo (`README.md`, `GETTING_STARTED.md`,
 `docs/INTEGRATION_BEASY.md`, etc.) est là si tu veux creuser, mais ce
@@ -442,6 +445,169 @@ dans `llm_search_kit/agent/base_skill.py`), tu le `register_skill()`
 sur l'engine, et le LLM saura naviguer entre les deux. Le routing
 (décider lequel appeler quand) est entièrement délégué au LLM, c'est
 exactement le point fort du tool-calling vs un router codé à la main.
+
+→ La section suivante te montre **exactement** comment, avec un
+exemple réel déjà committé.
+
+---
+
+## 8. Ajouter un nouveau tool (sans toucher à `soul.md`)
+
+> *"Est-ce qu'à chaque fois que je veux ajouter une route, je dois
+> modifier le `soul.md` ?"* — Non, jamais. Le `soul.md` ne **définit
+> aucun tool**. Il définit juste comment l'agent se comporte une fois
+> qu'il a des tools à dispo. La déclaration technique d'un tool vit
+> dans des fichiers Python séparés.
+
+### 8.a. Séparation des responsabilités (à mémoriser)
+
+Pour le backend Beasy, l'ensemble du wiring vit dans
+[`llm_search_kit/examples/beasyapp_backend/`](llm_search_kit/examples/beasyapp_backend/).
+Chaque fichier a **un et un seul** rôle :
+
+| Fichier | Couche | Rôle | Quand tu le touches |
+|---|---|---|---|
+| `schema.py` | **Définition technique du tool `search_catalog`** : nom, paramètres, types, drop_priority pour la relaxation | Quand tu modifies `SearchRequest.java` côté Spring (nouveau champ, type changé, …) |
+| `catalog.py` | **Exécution** : transforme `(filters, query)` en `POST /api/v1/listings/search` Spring + scrub PII | Quand le contrat HTTP de Spring change (URL, headers, format de réponse) |
+| `categories_skill.py` | **Un autre tool autonome** (`list_categories`) wrappant `GET /api/v1/categories` | Sert de gabarit pour tout nouveau tool que tu ajouteras |
+| `soul.md` | **Stratégie / personnalité** uniquement (ton, règles de mapping, anti-hallucination) | Quand tu changes le ton de l'agent, ses règles de comportement, sa langue |
+| `examples/beasy_service.py` | **Wire-up** : assemble tout et expose `POST /chat` sur Flask | Quand tu changes le port, l'auth, ou tu ajoutes un nouveau skill au registre |
+
+Le LLM **découvre** chaque tool via `name` + `description` +
+`parameters_schema` (3 props que chaque `BaseSkill` expose). Il décide
+seul lequel appeler. Le `soul.md` ne mentionne pas les tools — il dit
+juste *"appelle un tool quand l'user cherche un produit"* — ce qui
+reste vrai quel que soit le nombre de tools que tu as.
+
+### 8.b. Recette : ajouter un tool en 3 étapes
+
+Voici **exactement** ce qu'on a fait pour ajouter `list_categories`
+(commit `<HEAD>`). Tu peux copier-coller pour ton prochain tool
+(`get_orders`, `track_delivery`, `get_brands`, …).
+
+**Étape 1 — Crée la classe** (un fichier, ~50 lignes) :
+
+```python
+from llm_search_kit.agent.base_skill import BaseSkill, SkillResult
+
+class GetOrdersSkill(BaseSkill):
+    def __init__(self, base_url: str): ...
+
+    @property
+    def name(self) -> str:
+        return "get_orders"  # snake_case, verb-y, stable
+
+    @property
+    def description(self) -> str:
+        # CRITICAL: this sentence is how the LLM decides when to use you
+        # vs the other tools. Be specific. Mention what NOT to use it for.
+        return (
+            "Get the current user's past orders. Call this when the user "
+            "asks 'where is my order?', 'show my purchases', etc. Do NOT "
+            "use this for product browsing — use search_catalog instead."
+        )
+
+    @property
+    def parameters_schema(self) -> dict:
+        # JSON Schema. Keep it minimal — every extra param is one more
+        # thing the LLM can hallucinate.
+        return {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "shipped", "delivered", "cancelled"],
+                    "description": "Filter by order status (optional).",
+                },
+                "limit": {"type": "integer", "description": "Max orders (default 20)."},
+            },
+            "required": [],
+        }
+
+    async def execute(self, **kwargs) -> SkillResult:
+        kwargs.pop("__context__", None)  # always strip this
+        # ... HTTP call to GET /api/v1/orders ...
+        return SkillResult(success=True, data={...}, message="...")
+```
+
+Le gabarit complet (avec la couche HTTP, le cleanup, les error paths,
+et 10 tests unitaires) vit dans
+[`categories_skill.py`](llm_search_kit/examples/beasyapp_backend/categories_skill.py)
+et [`tests/test_categories_skill.py`](tests/test_categories_skill.py).
+
+**Étape 2 — Enregistre-le sur l'engine** (1 ligne) :
+
+```python
+engine.register_skill(GetOrdersSkill(base_url="https://ton-spring"))
+```
+
+Pour le `beasy_service`, on a fait encore plus simple : on a ajouté
+un paramètre `enable_categories_skill: bool = True` à `make_app(...)`
+(voir
+[`beasy_service.py`](llm_search_kit/examples/beasy_service.py)).
+Donc pour activer/désactiver le tool depuis la CLI, c'est :
+
+```bash
+# active (par défaut)
+python -m llm_search_kit.examples.beasy_service --beasy-url https://...
+
+# désactive (si ton Spring n'a pas /categories)
+python -m llm_search_kit.examples.beasy_service --beasy-url https://... --no-categories-skill
+```
+
+**Étape 3 — C'est tout.** Tu ne touches PAS au `soul.md`. Tu lances
+ton serveur. Le LLM verra automatiquement `list_categories` dans la
+liste des tools disponibles, lira sa `description`, et décidera tout
+seul quand l'appeler. Démo réelle (testé contre Mammouth
+`gpt-4.1-nano`) :
+
+```
+USER:    "What categories of products do you sell?"
+  → tool: list_categories({})
+  → reply: "We sell products in the categories of Electronics, Fashion, Baby, and Home."
+
+USER:    "Show me a samsung 4K TV"
+  → tool: search_catalog({"query": "Samsung 4K TV"})
+  → reply: "I found a Samsung 4K TV available for 180,000 FCFA..."
+
+USER:    "Quels rayons avez-vous ?"   (FR — jamais cité dans le code !)
+  → tool: list_categories({})
+  → reply: "Nous avons les rayons suivants : Électronique, Mode, Bébé et Maison."
+```
+
+→ Le routing entre les 2 tools est **purement** émergent depuis le
+`description` que tu écris. Aucun `if`, aucune règle hard-codée.
+
+### 8.c. La piste qui t'intéresse vraiment : génération depuis Swagger
+
+Tu as eu la bonne intuition : **oui, on peut générer `schema.py`
+automatiquement depuis ton OpenAPI/Swagger**. Ton Spring expose
+`/v3/api-docs` (springdoc-openapi) qui contient déjà le schéma JSON
+de `SearchRequest` — il y a une bijection presque parfaite avec
+notre `SearchSchema`.
+
+Ce qui se mappe automatiquement (~95% du fichier `schema.py`) :
+
+| Côté Spring (OpenAPI) | Côté kit (`SearchSchema`) |
+|---|---|
+| `SearchRequest.maxPrice : double` | `SearchField(name="max_price", json_type="number")` |
+| `SearchRequest.deliveryType : enum` | `SearchField(..., enum=[...])` |
+| `@Schema(description="...")` | `SearchField(..., description="...")` |
+| `categoryIds : List<Long>` | `SearchField(..., json_type="array", item_type="integer")` |
+
+Ce qui reste manuel (3 décisions business que l'OpenAPI ne contient pas) :
+
+| Donnée | Pourquoi pas auto | Solution propre |
+|---|---|---|
+| `drop_priority` (ordre de relaxation) | C'est une décision UX : "quand 0 résultat, lâcher quel filtre en premier ?" | Annoter via OpenAPI extension `x-llm-drop-priority: 5` côté Spring (supporté par springdoc, ne casse rien) |
+| `core_keys` (jamais drop) | Décision business : ex. ne jamais drop la `category` | Annotation `x-llm-core: true` |
+| `description` orientée LLM | Les `@Schema` Swagger sont rédigées pour les devs Java, pas pour un LLM. *"Maximum price"* vs *"Maximum price in FCFA. Only set when the user gave a number explicitly."* | Annotation `x-llm-description: "..."` qui surcharge la `description` standard |
+
+**Si tu veux que je code ce générateur** (`openapi_to_skill`,
+~200 lignes Python + tests), pingue-moi. Pour l'instant on attend que
+tu aies réellement besoin de scaler à 5+ tools / 30+ champs avant
+d'investir là-dedans — sur ton volume actuel, le `schema.py` à la
+main reste plus court à maintenir qu'un générateur.
 
 ---
 
