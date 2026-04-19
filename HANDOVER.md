@@ -182,7 +182,14 @@ moins pour prod sauf si tu as une bonne GPU.
 ```bash
 git clone https://github.com/JIV-DLS/llm-search-kit.git
 cd llm-search-kit
-pip install -e ".[dev,flask]"
+
+# Option A — la classique pip (la plus simple) :
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt    # tout : runtime + tests + flask
+
+# Option B — installation éditable (équivalente, déclarée dans pyproject.toml) :
+# pip install -e ".[dev,flask]"
+
 cp .env.example .env
 # édite .env (cf. section 3)
 

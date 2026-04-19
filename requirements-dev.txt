@@ -1,0 +1,17 @@
+# Development dependencies. Includes everything in requirements.txt
+# plus the test runner and the Flask server used by the
+# `llm_search_kit.examples.beasy_service` and
+# `llm_search_kit.examples.flask_server` examples.
+#
+# Install with:
+#   pip install -r requirements-dev.txt
+#
+# Or, equivalently:
+#   pip install -e ".[dev,flask]"
+
+-r requirements.txt
+
+pytest>=7.4
+pytest-asyncio>=0.23
+flask>=3.0
+rich>=13.0

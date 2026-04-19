@@ -37,7 +37,16 @@ cd llm-search-kit
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 
-pip install -e ".[dev,flask]"
+# Pick one — both install the exact same set of packages:
+pip install -r requirements-dev.txt   # classic pip workflow
+# pip install -e ".[dev,flask]"       # editable / setuptools workflow
+```
+
+If you only need the kit at run-time (no test runner, no flask example
+server) install the minimal set instead:
+
+```bash
+pip install -r requirements.txt
 ```
 
 **What success looks like:**

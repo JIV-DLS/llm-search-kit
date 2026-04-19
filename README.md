@@ -29,7 +29,8 @@ plug it into any catalog: products, jobs, recipes, anything searchable.
 
 ```bash
 git clone https://github.com/JIV-DLS/llm-search-kit.git && cd llm-search-kit
-pip install -e ".[dev,flask]"
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt        # or: pip install -e ".[dev,flask]"
 
 # 1) Verify the adapter against your backend, no LLM key needed:
 python -m llm_search_kit.examples.beasyapp_backend.smoke
