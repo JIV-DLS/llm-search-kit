@@ -9,6 +9,9 @@ Salut Armand. Ouvre **uniquement ce fichier**. Il contient :
 4. Les commandes copier-coller pour reproduire chaque test chez toi.
 5. Comment intégrer le kit dans Beasyapp (HTTP service prêt à l'emploi).
 6. Le seul "warning" qu'on a vu et ce qu'il signifie.
+7. **Comment ça marche sous le capot** — le tool-calling et la boucle
+   agentique, pour ne pas tomber dans le piège *"c'est juste de
+   l'extraction de paramètres"*.
 
 Tout le reste de la doc du repo (`README.md`, `GETTING_STARTED.md`,
 `docs/INTEGRATION_BEASY.md`, etc.) est là si tu veux creuser, mais ce
@@ -316,6 +319,129 @@ clairement absurdes renvoient 0 résultats au lieu d'un fallback fuzzy,
 ajoute un `min_score` ou un `match_phrase` Elasticsearch dans ton
 `AdvancedSearchService`. Mais 99% des vrais utilisateurs ne tapent
 pas des trucs absurdes, donc tu peux laisser comme ça en V1.
+
+> 🛡️ **Mise à jour** (commit `d716be1`) : le kit a maintenant un
+> garde-fou côté Python (`max_relaxed_total=50` par défaut dans
+> `flask_server`) qui détecte ce cas — quand la relaxation finit par
+> "matcher tout le catalogue", on jette le résultat et on renvoie
+> `total=0` au lieu de spammer des items hors-sujet. Donc même si
+> tu ne touches pas à ton matcher Spring, tu n'auras plus
+> *"j'ai demandé une Range Rover et on me propose des montres"*.
+> Voir [`tests/test_search_relaxation_runaway.py`](tests/test_search_relaxation_runaway.py)
+> pour les 7 cas de régression.
+
+---
+
+## 7. Comment ça marche sous le capot (très court mais important)
+
+Deux choses qui se font souvent mal comprendre, et qui valent le coup
+d'être dites clairement :
+
+### 7.a. Le LLM ne fait **pas** "juste extraire des paramètres"
+
+Quand on dit "le LLM extrait le request body qu'on envoie à Spring",
+c'est techniquement vrai mais ça **vend court** ce qu'il fait. Une
+vraie extraction (regex, NER) marche sur 1 schéma fixe et casse dès
+qu'on bouge. Le LLM, lui, fait **5 décisions distinctes à chaque
+tour** :
+
+1. **Routing** — *"parmi les N tools que je connais (`search_catalog`,
+   `get_user_orders`, `cancel_subscription`, …), lequel matche
+   l'intent ?"* — c'est une classification sur tout ton catalogue
+   d'outils. Aujourd'hui tu n'en as qu'un, mais demain tu en auras
+   plusieurs et **rien ne change côté kit**, c'est le LLM qui choisit.
+2. **Respect du JSON Schema** — *"quels champs sont requis, lesquels
+   sont optionnels, quels sont les types attendus ?"*. Le LLM doit
+   honorer le contrat publié par le `SearchCatalogSkill`.
+3. **Mapping sémantique** — *"l'user a dit 'noir' → `color="#000000"`,
+   il a dit 'à Lomé' → `city="Lomé"`, il a dit 'pas trop cher' → je
+   **n'invente pas** un `max_price` qu'il n'a pas donné"*.
+4. **Décision d'omission** — savoir **quand NE PAS** mettre un filtre
+   est aussi dur que savoir quand le mettre. C'est précisément ce qui
+   distingue un bon modèle (`gpt-4.1-mini` chez Mammouth, qui omet
+   bien) d'un mauvais (`qwen2.5:1.5b` en local, qui invente
+   `min_price=5000`).
+5. **Multi-tour** — après que ton tool a répondu, le LLM décide :
+   *"je rappelle le même tool avec d'autres params ? un autre tool ?
+   ou je réponds en langage naturel à l'user ?"*. C'est lui qui
+   orchestre, pas nous.
+
+C'est pour ça que dans la doc des fournisseurs LLM tu vois la mention
+**"function-calling capability"** — c'est précisément ce skill-là
+qu'on évalue, pas de la simple extraction.
+
+### 7.b. La boucle agentique (pattern *ReAct*)
+
+Tu avais raison aussi sur l'autre intuition : **on fait bien des
+boucles**. Ce n'est pas *"un appel LLM → un appel tool → fin"*. Le
+LLM peut rappeler le tool autant de fois qu'il en a besoin pour
+peaufiner. Le pseudo-code complet vit dans
+[`llm_search_kit/agent/engine.py:67-124`](llm_search_kit/agent/engine.py)
+(méthode `AgentEngine.process`) :
+
+```python
+for iteration in range(1, self._max_iterations + 1):
+    response = await self._llm.chat_completion(messages, tools, ...)
+    tool_calls = response["choices"][0]["message"].get("tool_calls") or []
+    if tool_calls:
+        execute_each_tool_and_append_results(tool_calls, messages)
+        continue                       # ← on rebalance au LLM
+    return response["choices"][0]["message"]["content"]   # ← réponse finale
+```
+
+Concrètement, les 3 cas typiques :
+
+**Cas 1 — 1 tour (le plus fréquent chez toi aujourd'hui)** :
+
+```
+User : "des vêtements bébé"
+  → LLM : tool_call(search_catalog, {query: "vêtements bébé"})
+  → Kit POST /api/v1/listings/search → 12 résultats
+  → LLM lit les 12 → "Voici 3 options qui matchent : ..."
+```
+
+**Cas 2 — 2 tours (auto-raffinement)** :
+
+```
+User : "samsung 4K pas trop cher"
+  → LLM : tool_call(search_catalog, {query: "samsung 4K", max_price: 200000})
+  → Kit POST → 0 résultat
+  → LLM voit 0, décide d'élargir : tool_call(search_catalog, {..., max_price: 350000})
+  → Kit POST → 5 résultats
+  → LLM : "J'ai dû élargir un peu ton budget, voici ce que j'ai trouvé..."
+```
+
+**Cas 3 — Multi-tools (futur, quand tu en auras plusieurs)** :
+
+```
+User : "annule ma commande 12345 et recommande-moi quelque chose"
+  → LLM : tool_call(cancel_order, {order_id: 12345}) → ok
+  → LLM : tool_call(get_user_history, {}) → liste
+  → LLM : tool_call(search_catalog, {category: "headphones", brand: "Sony"}) → 3 produits
+  → LLM : "Commande annulée. En te basant sur ton historique je te propose..."
+```
+
+### Garde-fous de la boucle
+
+- **`max_iterations = 10`** par défaut (constante `DEFAULT_MAX_ITERATIONS`
+  dans `engine.py`). Au-delà on coupe et on renvoie *"I'm having
+  trouble completing that request. Could you rephrase?"* — ça évite
+  qu'un LLM mal calibré boucle à l'infini.
+- En pratique sur des recherches produit on est **presque toujours
+  à 1-2 tours**. Si tu vois 5+ tours dans tes logs, c'est un signal
+  que ton `soul.md` (system prompt) hésite — ping-moi à ce
+  moment-là, on regarde ensemble.
+- Le `max_relaxed_total` côté `SearchCatalogSkill` (cf. section 6)
+  est l'autre garde-fou : il évite que la relaxation des filtres
+  finisse par "matcher tout le catalogue" à un tour donné.
+
+### Ce que ça veut dire pour toi quand tu ajouteras un 2e tool
+
+**Aucune modif côté kit.** Tu écris un nouveau `BaseSkill` (interface
+dans `llm_search_kit/agent/base_skill.py`), tu le `register_skill()`
+sur l'engine, et le LLM saura naviguer entre les deux. Le routing
+(décider lequel appeler quand) est entièrement délégué au LLM, c'est
+exactement le point fort du tool-calling vs un router codé à la main.
 
 ---
 
