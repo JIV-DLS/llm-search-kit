@@ -611,6 +611,131 @@ main reste plus court à maintenir qu'un générateur.
 
 ---
 
+## 9. Capacités v0.2 — observabilité, parallélisme, et tools en 1 ligne
+
+Trois ajouts récents qui rendent le kit utilisable en prod sans
+réécrire d'infra autour. Ils répondent aux trois manques les plus
+visibles vs LangChain / Pydantic-AI / OpenAI Agents SDK.
+
+### 9.1 — Décorateur `@skill` : zéro JSON Schema à écrire
+
+Plutôt que de sous-classer `BaseSkill` et d'écrire à la main un
+`parameters_schema` JSON (source #1 de typos), tu écris une fonction
+async normale et tu la décores :
+
+```python
+from pydantic import Field
+from llm_search_kit import skill, SkillResult
+
+@skill(description="Look up a customer by id.")
+async def get_customer(
+    customer_id: int = Field(..., description="Internal customer id."),
+    include_orders: bool = Field(False, description="Embed recent orders."),
+    ctx: dict | None = None,    # optional: receives engine context
+) -> SkillResult:
+    tenant = (ctx or {}).get("tenant", "default")
+    # ... fetch & return ...
+    return SkillResult(success=True, data={"customer": {...}})
+
+engine.register_skill(get_customer)   # it's already a BaseSkill
+```
+
+Ce que le décorateur fait pour toi :
+
+| Capacité | Comment |
+|---|---|
+| Génère le JSON Schema OpenAI | Inspect signature + Pydantic `model_json_schema()` |
+| Valide / coerce les payloads LLM | Pydantic v2 (`"42"` → `42`, rejette `"abc"` pour un `int`) |
+| Erreur claire pour le LLM | `SkillResult(success=False, error="Invalid parameters: ...")` au lieu d'un crash → l'agent corrige au tour suivant |
+| Injection optionnelle du `ctx` | Si tu déclares `ctx` (ou `context`), le dict passé à `engine.process(..., context=...)` arrive automatiquement |
+| Wrapping automatique du retour | `dict` → `SkillResult.data`, `SkillResult` passe through |
+
+Tu peux **mélanger** des skills décorées et des `BaseSkill` historiques
+(ex. `SearchCatalogSkill`, `CategoriesSkill`) sur le même engine —
+zéro couplage.
+
+### 9.2 — Hooks / callbacks : observabilité non-intrusive
+
+Inspiré de `langchain.BaseCallbackHandler` et `openai-agents.RunHooks`.
+Permet d'observer chaque étape de la boucle sans toucher au code de
+l'agent : tracing, métriques Datadog, logs Langfuse, feedback UI
+*"appel de search_catalog en cours…"*, A/B test des prompts, etc.
+
+```python
+from llm_search_kit import (
+    AgentEngine, CompositeHooks, LoggingHooks, NoOpHooks,
+)
+
+class DatadogHooks(NoOpHooks):
+    """Override ONLY the events you care about."""
+    async def on_tool_end(self, skill, params, tool_call_id, result, latency_ms):
+        statsd.timing(f"agent.tool.{skill}", latency_ms)
+        if not result.success:
+            statsd.increment(f"agent.tool.{skill}.error")
+
+class LangfuseHooks(NoOpHooks):
+    async def on_llm_end(self, iteration, response, latency_ms):
+        usage = (response or {}).get("usage", {})
+        langfuse.trace(name=f"iter-{iteration}", metrics=usage, latency_ms=latency_ms)
+
+engine = AgentEngine(
+    llm_client=llm,
+    system_prompt=SOUL,
+    hooks=CompositeHooks([
+        LoggingHooks("INFO"),       # built-in: structured log per event
+        DatadogHooks(),
+        LangfuseHooks(),
+    ]),
+)
+```
+
+Événements émis (tous async, tous swallow-on-error pour ne pas tuer
+l'agent si une instrumentation crashe) :
+
+```
+on_iteration_start  on_llm_start  on_llm_end
+                    └─→ on_tool_start ─→ on_tool_end (× N en parallèle)
+on_iteration_end
+on_final_reply        # à la fin de tout le run
+on_error              # uniquement si la boucle elle-même crashe
+```
+
+### 9.3 — Tool calls en parallèle (gain ×N latence)
+
+Quand le LLM émet plusieurs tool calls dans le même tour
+(comportement standard pour `gpt-4o`, `gpt-4.1`, Claude 4, Mammouth
+quality), ils étaient avant exécutés en `for` sériel. Ils sont
+maintenant exécutés sous `asyncio.gather` avec un sémaphore
+configurable :
+
+```python
+engine = AgentEngine(
+    llm_client=llm,
+    system_prompt=SOUL,
+    tool_call_concurrency=5,    # default; bump to 10+ for IO-heavy tools
+)
+```
+
+Ce que ça change concrètement : un tour qui émet
+`[get_price(item), get_stock(item), get_reviews(item)]`
+passe de ~3 × 200 ms = **600 ms** à ~**200 ms**. La sortie reste
+ordonnée pour respecter le contrat OpenAI sur les `tool_call_id`.
+
+### 9.4 — Modèles compatibles avec le multi-tool parallèle
+
+| Provider | Émet plusieurs tool calls dans le même tour ? |
+|---|---|
+| OpenAI `gpt-4o`, `gpt-4o-mini`, `gpt-4.1*` | ✅ oui, c'est l'option par défaut |
+| Anthropic Claude 3.5+ via OpenAI-compat (Mammouth, OpenRouter) | ✅ oui |
+| Mammouth `auto-quality` / `mammouth-gpt-4-1*` | ✅ oui |
+| Groq `llama-3.3-70b` | 🟡 partiellement |
+| Ollama `qwen2.5`, `llama3.1` | 🟡 dépend du modèle / souvent un seul tool/tour |
+
+Si ton modèle ne fait qu'un tool par tour, tout fonctionne quand même,
+on retombe juste sur le mode séquentiel naturel.
+
+---
+
 ## TL;DR (à coller dans Slack à ton équipe)
 
 > On a un kit Python qui transforme une phrase utilisateur en appel
