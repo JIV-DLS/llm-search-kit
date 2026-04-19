@@ -24,6 +24,8 @@ ENV/
 .env
 .env.local
 .env.*.local
+.env.gateway
+.env.*
 
 # Local secret scratchpads — anything matching these patterns is
 # someone pasting a key/token into a quick file. Never push.
