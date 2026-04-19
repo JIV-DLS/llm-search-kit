@@ -55,7 +55,7 @@ from typing import Any, Callable, Dict, List, Optional
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
 
-from llm_search_kit import AgentEngine, SearchCatalogSkill  # noqa: E402
+from llm_search_kit import AgentEngine, OpenAILLMClient, SearchCatalogSkill  # noqa: E402
 from llm_search_kit.config import (  # noqa: E402
     build_default_llm_client, llm_api_key, llm_base_url, llm_model,
 )
@@ -372,12 +372,116 @@ async def _run_one(engine: AgentEngine, sc: Scenario) -> ScenarioResult:
     )
 
 
-async def _run_all(scenarios: List[Scenario], backend_url: str) -> List[ScenarioResult]:
-    catalog = BeasyappCatalog(base_url=backend_url, timeout=60.0)
+class _StubBeasyCatalog:
+    """Tiny in-memory Beasy-shaped catalog for offline runs.
+
+    Used when ``--use-stub-backend`` is passed, e.g. when Armand's ngrok
+    tunnel is offline. The verdicts in this script mostly check the LLM's
+    extracted FILTERS (which depend only on the prompt + model + system
+    prompt, not on the catalog), so we don't need real product data to
+    produce a useful model leaderboard.
+    """
+
+    _DATA: List[Dict[str, Any]] = [
+        {"id": "s1", "title": "Body bébé en coton bio 0-3 mois",
+         "price": 3500, "color": "#ffffff", "deliveryType": "ASIGANME",
+         "city": "Lomé", "hasDiscount": False, "debatable": True,
+         "creator": {"id": 1}},
+        {"id": "s2", "title": "Pyjama bébé doux 6-9 mois",
+         "price": 5200, "color": "#ffc0cb", "deliveryType": "USER",
+         "city": "Lomé", "hasDiscount": True, "debatable": False,
+         "creator": {"id": 2}},
+        {"id": "s3", "title": "Samsung TV 4K 50 pouces",
+         "price": 95_000, "color": "#000000", "deliveryType": "ASIGANME",
+         "city": "Lomé", "hasDiscount": False, "debatable": True,
+         "creator": {"id": 3}},
+        {"id": "s4", "title": "Casque audio rouge sans-fil",
+         "price": 18_000, "color": "#ff0000", "deliveryType": "USER",
+         "city": "Lomé", "hasDiscount": True, "debatable": False,
+         "creator": {"id": 4}},
+        {"id": "s5", "title": "Casque noir Bluetooth",
+         "price": 12_000, "color": "#000000", "deliveryType": "ASIGANME",
+         "city": "Lomé", "hasDiscount": False, "debatable": False,
+         "creator": {"id": 5}},
+        {"id": "s6", "title": "Chemise bleue pour homme taille M",
+         "price": 7_500, "color": "#0000ff", "deliveryType": "USER",
+         "city": "Lomé", "hasDiscount": False, "debatable": True,
+         "creator": {"id": 6}},
+        {"id": "s7", "title": "Robot cuiseur multifonction",
+         "price": 45_000, "color": "#c0c0c0", "deliveryType": "ASIGANME",
+         "city": "Lomé", "hasDiscount": True, "debatable": False,
+         "creator": {"id": 7}},
+        {"id": "s8", "title": "iPhone 15 reconditionné 128 Go",
+         "price": 320_000, "color": "#000000", "deliveryType": "USER",
+         "city": "Lomé", "hasDiscount": False, "debatable": True,
+         "creator": {"id": 8}},
+    ]
+
+    async def search(self, filters: Dict[str, Any], query: str = "",
+                     sort_by: str = "relevance",
+                     skip: int = 0, limit: int = 10) -> Dict[str, Any]:
+        rows = list(self._DATA)
+        q = (query or "").lower().strip()
+        if q:
+            tokens = [t for t in re.split(r"\W+", q) if t]
+            def matches(row: Dict[str, Any]) -> bool:
+                title = row["title"].lower()
+                # baby/bebe synonyms — let "bebe" match titles with "bébé"
+                norm_title = (title.replace("é", "e").replace("è", "e")
+                              .replace("ê", "e").replace("à", "a"))
+                return any(t in title or t in norm_title for t in tokens)
+            rows = [r for r in rows if matches(r)]
+        if (mn := filters.get("min_price")) is not None:
+            rows = [r for r in rows if r["price"] >= float(mn)]
+        if (mx := filters.get("max_price")) is not None:
+            rows = [r for r in rows if r["price"] <= float(mx)]
+        if (c := filters.get("color")):
+            rows = [r for r in rows if r["color"].lower() == c.lower()]
+        if (city := filters.get("city")):
+            rows = [r for r in rows if city.lower() in r["city"].lower()]
+        if (dt := filters.get("delivery_type")):
+            rows = [r for r in rows if r["deliveryType"] == dt.upper()]
+        if filters.get("has_discount") is True:
+            rows = [r for r in rows if r["hasDiscount"]]
+        if filters.get("debatable") is True:
+            rows = [r for r in rows if r["debatable"]]
+        total = len(rows)
+        if sort_by == "price_asc":
+            rows.sort(key=lambda r: r["price"])
+        elif sort_by == "price_desc":
+            rows.sort(key=lambda r: -r["price"])
+        return {"items": rows[skip:skip + limit], "total": total,
+                "metadata": {"backend": "stub"}}
+
+    async def aclose(self) -> None:  # noqa: D401 — match BeasyappCatalog
+        return None
+
+
+async def _run_all(
+    scenarios: List[Scenario],
+    backend_url: str,
+    *,
+    model_override: Optional[str] = None,
+    use_stub_backend: bool = False,
+) -> List[ScenarioResult]:
+    catalog = _StubBeasyCatalog() if use_stub_backend else BeasyappCatalog(base_url=backend_url, timeout=60.0)
     schema = build_schema()
     skill = SearchCatalogSkill(schema=schema, backend=catalog)
+    # The Technas LLM gateway sits behind oauth2-proxy on the public URL,
+    # which strips the standard `Authorization: Bearer` header. LiteLLM also
+    # accepts the same key under `x-api-key`, which oauth2-proxy leaves
+    # alone. We send both so the runner works whether you point LLM_BASE_URL
+    # at the public gateway, an in-cluster service, or a third-party
+    # OpenAI-compatible endpoint that ignores extra headers.
+    extra_headers = {"x-api-key": llm_api_key()} if llm_api_key() else None
+    llm = OpenAILLMClient(
+        base_url=llm_base_url(),
+        api_key=llm_api_key(),
+        model=model_override or llm_model(),
+        extra_headers=extra_headers,
+    )
     engine = AgentEngine(
-        llm_client=build_default_llm_client(),
+        llm_client=llm,
         system_prompt=_load_soul(),
         max_iterations=5,
     )
@@ -466,12 +570,120 @@ def _write_markdown(path: str, results: List[ScenarioResult],
 # --------------------------------------------------------------------- main
 
 
+def _print_leaderboard(per_model: Dict[str, List[ScenarioResult]]) -> None:
+    """Print a side-by-side comparison of multiple models.
+
+    For each scenario, show per-model verdict; at the end show a totals row
+    sorted by best-PASS / fewest-FAIL / shortest-elapsed.
+    """
+    models = list(per_model.keys())
+    print()
+    print(_color("=== Cross-model leaderboard ===", "1;36"))
+    scenario_ids = [r.scenario_id for r in next(iter(per_model.values()))]
+
+    # Header row
+    name_w = max(len(s) for s in scenario_ids) + 2
+    cell_w = max(12, max(len(m) for m in models) + 2)
+    print()
+    print(" " * name_w + "  " + "".join(m.ljust(cell_w) for m in models))
+    print(" " * name_w + "  " + ("-" * cell_w) * len(models))
+
+    for sid in scenario_ids:
+        cells = []
+        for m in models:
+            r = next((r for r in per_model[m] if r.scenario_id == sid), None)
+            if r is None:
+                cells.append("?".ljust(cell_w))
+                continue
+            code, sym = _VERDICT_STYLES[r.verdict]
+            cells.append(_color(f"{sym}{r.verdict:<5}".ljust(cell_w), code))
+        print(sid.ljust(name_w) + "  " + "".join(cells))
+
+    # Totals
+    print(" " * name_w + "  " + ("-" * cell_w) * len(models))
+    totals_pass = [sum(1 for r in per_model[m] if r.verdict == "PASS") for m in models]
+    totals_warn = [sum(1 for r in per_model[m] if r.verdict == "WARN") for m in models]
+    totals_fail = [sum(1 for r in per_model[m] if r.verdict == "FAIL") for m in models]
+    totals_time = [sum(r.elapsed_s for r in per_model[m]) for m in models]
+    print("PASS".ljust(name_w) + "  " + "".join(_color(f"{p}".ljust(cell_w), "32") for p in totals_pass))
+    print("WARN".ljust(name_w) + "  " + "".join(_color(f"{w}".ljust(cell_w), "33") for w in totals_warn))
+    print("FAIL".ljust(name_w) + "  " + "".join(_color(f"{f}".ljust(cell_w), "31") for f in totals_fail))
+    print("time(s)".ljust(name_w) + "  " + "".join(f"{t:.1f}".ljust(cell_w) for t in totals_time))
+    print()
+
+    # Recommendation
+    n = len(scenario_ids)
+    ranked = sorted(
+        models,
+        key=lambda m: (
+            -sum(1 for r in per_model[m] if r.verdict == "PASS"),
+            sum(1 for r in per_model[m] if r.verdict == "FAIL"),
+            sum(r.elapsed_s for r in per_model[m]),
+        ),
+    )
+    print(_color("Ranking (best -> worst):", "1"))
+    for i, m in enumerate(ranked, 1):
+        p = sum(1 for r in per_model[m] if r.verdict == "PASS")
+        f = sum(1 for r in per_model[m] if r.verdict == "FAIL")
+        t = sum(r.elapsed_s for r in per_model[m])
+        print(f"  {i}. {m:<22} {p}/{n} PASS  {f} FAIL  {t:.1f}s total")
+
+
+def _write_leaderboard_md(path: str, per_model: Dict[str, List[ScenarioResult]],
+                          header: Dict[str, str]) -> None:
+    models = list(per_model.keys())
+    scenario_ids = [r.scenario_id for r in next(iter(per_model.values()))]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# LLM scenario leaderboard\n\n")
+        for k, v in header.items():
+            f.write(f"- **{k}**: `{v}`\n")
+        f.write("\n## Per-scenario verdicts\n\n")
+        f.write("| Scenario | " + " | ".join(f"`{m}`" for m in models) + " |\n")
+        f.write("|---" + "|---" * len(models) + "|\n")
+        for sid in scenario_ids:
+            cells = []
+            for m in models:
+                r = next((r for r in per_model[m] if r.scenario_id == sid), None)
+                cells.append(r.verdict if r else "?")
+            f.write(f"| `{sid}` | " + " | ".join(cells) + " |\n")
+        f.write("\n## Totals\n\n")
+        f.write("| Model | PASS | WARN | FAIL | total time (s) |\n")
+        f.write("|---|---|---|---|---|\n")
+        for m in models:
+            p = sum(1 for r in per_model[m] if r.verdict == "PASS")
+            w = sum(1 for r in per_model[m] if r.verdict == "WARN")
+            ff = sum(1 for r in per_model[m] if r.verdict == "FAIL")
+            t = sum(r.elapsed_s for r in per_model[m])
+            f.write(f"| `{m}` | {p} | {w} | {ff} | {t:.1f} |\n")
+        f.write("\n## Per-model details\n\n")
+        for m in models:
+            f.write(f"### `{m}`\n\n")
+            f.write("| Verdict | Scenario | Filters | Top result | Notes |\n")
+            f.write("|---|---|---|---|---|\n")
+            for r in per_model[m]:
+                short = {k: v for k, v in r.filters.items() if v not in (None, "")}
+                f.write(f"| {r.verdict} | `{r.scenario_id}` "
+                        f"| `{json.dumps(short, ensure_ascii=False)}` "
+                        f"| {r.top_titles[0] if r.top_titles else '-'} "
+                        f"| {' / '.join(r.notes) or '-'} |\n")
+            f.write("\n")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--backend-url", default=os.environ.get("BEASY_BASE_URL", _DEFAULT_BACKEND),
                    help="Beasyapp backend URL (default: %(default)s)")
     p.add_argument("--only", help="Run only the scenario whose id matches.")
     p.add_argument("--out-md", help="Also write a Markdown report to this path.")
+    p.add_argument("--models",
+                   help="Comma-separated list of models to compare side-by-side. "
+                        "When set, runs every scenario against each model and "
+                        "prints a leaderboard. Example: "
+                        "--models=claude-3-5-sonnet,gemini-2-5-flash")
+    p.add_argument("--use-stub-backend", action="store_true",
+                   help="Use the in-memory stub catalog instead of hitting "
+                        "--backend-url. Useful when the real backend is offline "
+                        "or for fast offline-ish leaderboard runs.")
     args = p.parse_args()
 
     if not llm_api_key():
@@ -488,14 +700,36 @@ def main() -> None:
                   f"Known ids: {[s.id for s in SCENARIOS]}")
             sys.exit(2)
 
-    header = {
-        "Backend":  args.backend_url,
+    backend_label = "in-memory stub" if args.use_stub_backend else args.backend_url
+    common_header = {
+        "Backend":  backend_label,
         "LLM URL":  llm_base_url(),
-        "Model":    llm_model(),
         "Run at":   time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
-    results = asyncio.run(_run_all(scenarios, args.backend_url))
+    if args.models:
+        models = [m.strip() for m in args.models.split(",") if m.strip()]
+        per_model: Dict[str, List[ScenarioResult]] = {}
+        for m in models:
+            print(_color(f"\n>>> Running {len(scenarios)} scenarios against model={m}", "1;34"))
+            results = asyncio.run(_run_all(
+                scenarios, args.backend_url,
+                model_override=m, use_stub_backend=args.use_stub_backend))
+            per_model[m] = results
+            header = {**common_header, "Model": m}
+            _print_terminal(results, header)
+        _print_leaderboard(per_model)
+        if args.out_md:
+            _write_leaderboard_md(args.out_md, per_model, common_header)
+            print(f"\n  Leaderboard report written to {args.out_md}")
+        any_fail = any(r.verdict == "FAIL"
+                       for results in per_model.values() for r in results)
+        sys.exit(0 if not any_fail else 1)
+
+    header = {**common_header, "Model": llm_model()}
+    results = asyncio.run(_run_all(
+        scenarios, args.backend_url,
+        use_stub_backend=args.use_stub_backend))
     _print_terminal(results, header)
     if args.out_md:
         _write_markdown(args.out_md, results, header)
