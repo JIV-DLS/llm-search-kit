@@ -86,6 +86,8 @@ def create_app(
     llm_client: Optional[BaseLLMClient] = None,
     system_prompt: str = SYSTEM_PROMPT,
     history_size: int = 12,
+    max_relaxed_total: Optional[int] = 50,
+    max_relaxed_growth_factor: float = 5.0,
 ) -> Flask:
     """Build and return a configured Flask app.
 
@@ -114,7 +116,12 @@ def create_app(
         )
         llm_client = build_default_llm_client()
 
-    skill  = SearchCatalogSkill(schema=schema, backend=catalog)
+    skill  = SearchCatalogSkill(
+        schema=schema,
+        backend=catalog,
+        max_relaxed_total=max_relaxed_total,
+        max_relaxed_growth_factor=max_relaxed_growth_factor,
+    )
     engine = AgentEngine(llm_client=llm_client, system_prompt=system_prompt)
     engine.register_skill(skill)
 

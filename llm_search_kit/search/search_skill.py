@@ -39,15 +39,49 @@ class SearchCatalogSkill(BaseSkill):
         description: str = DEFAULT_DESCRIPTION,
         default_limit: int = 10,
         default_sort_by: str = "relevance",
+        max_relaxed_total: Optional[int] = None,
+        max_relaxed_growth_factor: float = 5.0,
     ) -> None:
+        """
+        Parameters
+        ----------
+        max_relaxed_total:
+            Hard cap on how many items a *relaxed* level (level > 0) is
+            allowed to return before we treat it as "the remaining filters
+            stopped discriminating anything" and bail out with an empty
+            result instead. Without this guard, some backends (Spring/JPA
+            with an empty Specification, ES with an unknown query falling
+            back to match_all, etc.) happily return the entire catalog
+            once the structured filters get stripped — leading to
+            "I asked for a Range Rover and got watches" UX disasters.
+
+            Default ``None`` keeps backward compatibility (no cap). Set
+            to e.g. ``50`` for typical product search to mean "if a
+            relaxed level matches >50 items, the user did NOT really
+            want this — return empty so the UI can ask a clarifying
+            question instead".
+        max_relaxed_growth_factor:
+            Companion safety net for when the backend's total is large
+            enough that ``max_relaxed_total`` would still match. If a
+            relaxed level returns more than ``factor * level0_total``
+            items (and level 0 returned at least one), assume the
+            relaxation made the query meaningless. Defaults to 5×.
+            Ignored when level 0 returned 0 items (we have no baseline).
+        """
         if default_limit <= 0:
             raise ValueError("default_limit must be positive")
+        if max_relaxed_total is not None and max_relaxed_total <= 0:
+            raise ValueError("max_relaxed_total must be positive when set")
+        if max_relaxed_growth_factor <= 1.0:
+            raise ValueError("max_relaxed_growth_factor must be > 1.0")
         self._schema = schema
         self._backend = backend
         self._name = name
         self._description = description
         self._default_limit = default_limit
         self._default_sort_by = default_sort_by
+        self._max_relaxed_total = max_relaxed_total
+        self._max_relaxed_growth_factor = max_relaxed_growth_factor
         self._cached_params_schema = self._build_parameters_schema()
 
     @property
@@ -61,6 +95,27 @@ class SearchCatalogSkill(BaseSkill):
     @property
     def parameters_schema(self) -> Dict[str, Any]:
         return self._cached_params_schema
+
+    def _is_runaway_relaxation(
+        self,
+        level: int,
+        total: int,
+        level0_total: Optional[int],
+    ) -> bool:
+        """Return True if a relaxed-level result looks like the backend
+        gave up filtering and returned (most of) the catalog.
+
+        Two independent triggers:
+          * absolute cap: ``max_relaxed_total`` is set and exceeded;
+          * growth ratio: level 0 returned a non-zero baseline and this
+            level returned more than ``growth_factor ×`` that baseline.
+        """
+        if self._max_relaxed_total is not None and total > self._max_relaxed_total:
+            return True
+        if level0_total and level0_total > 0:
+            if total > self._max_relaxed_growth_factor * level0_total:
+                return True
+        return False
 
     def _build_parameters_schema(self) -> Dict[str, Any]:
         params = self._schema.to_openai_parameters()
@@ -123,6 +178,7 @@ class SearchCatalogSkill(BaseSkill):
         )
 
         last_result: Optional[Dict[str, Any]] = None
+        level0_total: Optional[int] = None
         for level, relaxed in enumerate(levels):
             logger.info(
                 "[SEARCH] level=%d filters=%s query=%r sort=%s",
@@ -137,7 +193,28 @@ class SearchCatalogSkill(BaseSkill):
             )
             last_result = result
             total = int(result.get("total", len(result.get("items", []))) or 0)
+            if level == 0:
+                level0_total = total
             if total > 0:
+                # Relaxed-level safety: catch backends that "match all"
+                # once the structured filters get stripped (Spring with
+                # an empty Specification, ES match_all fallback, etc.).
+                # Without this, "I want a Range Rover" relaxes to
+                # ``filters={}, query="Range Rover"`` and the backend
+                # ignores the unknown query → returns the full
+                # catalogue. We'd rather honestly say "no match" than
+                # return watches and tractors.
+                if level > 0 and self._is_runaway_relaxation(level, total, level0_total):
+                    logger.warning(
+                        "[SEARCH] discarding relaxed level %d (total=%d): "
+                        "looks like the remaining filters stopped "
+                        "discriminating anything (level0_total=%s, "
+                        "max_relaxed_total=%s, growth_factor=%s)",
+                        level, total, level0_total,
+                        self._max_relaxed_total,
+                        self._max_relaxed_growth_factor,
+                    )
+                    break
                 items = result.get("items", [])
                 payload: Dict[str, Any] = {
                     "items": items,
