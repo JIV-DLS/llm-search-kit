@@ -184,6 +184,31 @@ one (in order of cheapest-to-try-first):
 | **OpenAI**   | https://platform.openai.com/api-keys                | ❌ paid only            | `LLM_BASE_URL=https://api.openai.com/v1`<br>`LLM_MODEL=gpt-4o-mini`<br>`LLM_API_KEY=sk-...`                |
 | **OpenRouter** | https://openrouter.ai/keys                       | ✅ small free credit    | `LLM_BASE_URL=https://openrouter.ai/api/v1`<br>`LLM_MODEL=meta-llama/llama-3.1-8b-instruct:free`<br>`LLM_API_KEY=sk-or-...` |
 | **Ollama**   | local                                               | ✅ free, your hardware  | `LLM_BASE_URL=http://localhost:11434/v1`<br>`LLM_MODEL=qwen2.5:1.5b`<br>`LLM_API_KEY=` *(empty — see Ollama notes below)* |
+| **Technas LLM gateway** *(internal — skip if you’re outside Technas)* | https://llm.technas.fr | ✅ (Technas devs)    | `LLM_BASE_URL=https://llm.technas.fr/v1`<br>`LLM_MODEL=auto-quality`<br>`LLM_API_KEY=<litellm master>`<br>`LLM_TECHNAS_KEY=pk_...` *(see below)* |
+
+### 5.bis Running against the Technas LLM gateway (internal devs only)
+
+If you work at Technas and want `llm-search-kit` (CLI or `flask_server`)
+to route through `llm.technas.fr`, the config needs one **extra** secret
+on top of `LLM_API_KEY`:
+
+- **`LLM_TECHNAS_KEY`** — a `pk_…` project key minted by the Payment
+  service. Without it the gateway counts your calls as `caller=invalid`
+  and — once strict mode is on — **rejects** them with HTTP 401.
+
+Pull the key from Vault (the project slug for this repo is
+`llm-search-kit`):
+
+```bash
+export LLM_API_KEY=$(vault kv get -field=master-key  kv/technas/llm-gateway)
+export LLM_TECHNAS_KEY=$(vault kv get -field=api_key kv/technas/llm-search-kit/llm-gateway-key)
+export LLM_BASE_URL=https://llm.technas.fr/v1
+export LLM_MODEL=auto-quality
+```
+
+The kit picks `LLM_TECHNAS_KEY` up automatically when `LLM_BASE_URL`
+contains `llm.technas.fr` — no code change needed. (See
+`llm_search_kit/config.py::_technas_extra_headers`.)
 
 ```bash
 cp .env.example .env
